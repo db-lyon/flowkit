@@ -1,7 +1,7 @@
 {
-  "name": "flowkit",
+  "name": "@db-lyon/flowkit",
   "version": "0.1.0",
-  "description": "YAML-configured task/flow orchestration engine inspired by CumulusCI",
+  "description": "YAML-configured task and flow orchestration engine",
   "type": "module",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -27,7 +27,7 @@
     "orchestration",
     "yaml",
     "pipeline",
-    "cumulusci"
+    "engine"
   ],
   "author": "David Lyon",
   "license": "MIT",

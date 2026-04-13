@@ -4,7 +4,7 @@ interface MergeAnnotated {
 }
 
 /**
- * Deep-merges two values with CumulusCI-style semantics:
+ * Deep-merges two values:
  *
  * - Objects: recursive key-by-key merge (override wins per-key)
  * - Arrays: replace by default; `__merge: 'append'` on the override array concatenates
