@@ -17,8 +17,23 @@
   ],
   "scripts": {
     "build": "tsc -b",
+    "prepublishOnly": "tsc -b",
     "test": "vitest run",
     "test:watch": "vitest"
+  },
+  "keywords": [
+    "task",
+    "flow",
+    "orchestration",
+    "yaml",
+    "pipeline",
+    "cumulusci"
+  ],
+  "author": "David Lyon",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/db-lyon/flowkit.git"
   },
   "dependencies": {
     "js-yaml": "^4",

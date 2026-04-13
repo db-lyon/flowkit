@@ -4,6 +4,8 @@ export const TaskOptionsSchema = z.record(z.unknown());
 
 export const TaskDefinitionSchema = z.object({
   class_path: z.string().min(1),
+  description: z.string().optional(),
+  group: z.string().optional(),
   options: TaskOptionsSchema.optional().default({}),
 });
 
