@@ -62,6 +62,41 @@ export class TaskRegistry {
     return new TaskClass(ctx, options);
   }
 
+  /**
+   * Wrap an existing registered task with a decorator class.
+   *
+   * The `wrapper` factory receives the original constructor and must return
+   * a new constructor — typically a subclass that calls `super.execute()`.
+   * Multiple wraps compose: each layer sees the previously wrapped version
+   * as its `Original`.
+   *
+   * ```ts
+   * registry.wrap('asset.list', (Original) => {
+   *   return class extends Original {
+   *     get taskName() { return 'asset.list:filtered'; }
+   *     async execute() {
+   *       const result = await super.execute();
+   *       // post-process result …
+   *       return result;
+   *     }
+   *   };
+   * });
+   * ```
+   */
+  wrap(name: string, wrapper: (Original: TaskConstructor) => TaskConstructor): this {
+    const original = this.nameMap.get(name) ?? this.classPathMap.get(name);
+    if (!original) {
+      throw new Error(
+        `Cannot wrap task "${name}" — not found in registry. ` +
+          `Registered: ${this.listRegistered().join(', ')}`,
+      );
+    }
+    const wrapped = wrapper(original);
+    // Always write to nameMap so subsequent resolve() finds it
+    this.nameMap.set(name, wrapped);
+    return this;
+  }
+
   /** Return all registered names and class paths. */
   listRegistered(): string[] {
     return [...new Set([...this.nameMap.keys(), ...this.classPathMap.keys()])];

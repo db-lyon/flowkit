@@ -1,8 +1,10 @@
 import type { Logger } from '../logger.js';
 import { noopLogger } from '../logger.js';
+import type { TaskRegistry } from './registry.js';
 
 export interface TaskContext {
   logger?: Logger;
+  registry?: TaskRegistry;
   [key: string]: unknown;
 }
 
@@ -30,6 +32,37 @@ export abstract class BaseTask<TOpts = Record<string, unknown>> {
 
   /** Override for option validation — called before execute(). */
   protected validate(): void {}
+
+  /**
+   * Resolve another task by name from the registry.
+   * Returns an unexecuted task instance — call `.run()` on it yourself
+   * when you need to inspect or configure the task before running.
+   */
+  protected async resolve<T extends BaseTask = BaseTask>(
+    taskName: string,
+    options?: Record<string, unknown>,
+  ): Promise<T> {
+    const registry = this.ctx.registry;
+    if (!registry) {
+      throw new Error(
+        `Cannot resolve task "${taskName}" — no registry in context. ` +
+          'Tasks can only resolve other tasks when run via FlowRunner.',
+      );
+    }
+    return registry.create(taskName, this.ctx, options ?? {}) as Promise<T>;
+  }
+
+  /**
+   * Resolve and execute another task by name in a single call.
+   * The resolved task shares this task's context (bridge, project, etc.).
+   */
+  protected async call(
+    taskName: string,
+    options?: Record<string, unknown>,
+  ): Promise<TaskResult> {
+    const task = await this.resolve(taskName, options);
+    return task.run();
+  }
 
   /**
    * Lifecycle wrapper: validate → execute → return result.

@@ -79,8 +79,11 @@ export class FlowRunner {
     this.tasks = config.tasks;
     this.flows = config.flows;
     this.registry = config.registry;
-    this.ctx = config.context;
     this.hooks = config.hooks ?? {};
+
+    // Inject registry into context so tasks can resolve/call other tasks.
+    // Spread to avoid mutating the caller's context object.
+    this.ctx = { ...config.context, registry: config.registry };
   }
 
   async run(options: FlowRunOptions): Promise<FlowRunResult> {
