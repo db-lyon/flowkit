@@ -13,6 +13,8 @@ export interface FlowRunOptions {
   flowName: string;
   skip?: string[];
   plan?: boolean;
+  /** Runtime parameters — merged into every step's options with highest priority. */
+  params?: Record<string, unknown>;
 }
 
 export interface FlowStepResult {
@@ -186,7 +188,7 @@ export class FlowRunner {
         let stepResult: FlowStepResult;
 
         if (planStep.type === 'task') {
-          const taskResult = await this.executeTaskStep(planStep);
+          const taskResult = await this.executeTaskStep(planStep, options.params);
           stepResult = {
             stepNumber: planStep.stepNumber,
             type: 'task',
@@ -256,9 +258,13 @@ export class FlowRunner {
     return result;
   }
 
-  private async executeTaskStep(step: PlanStep): Promise<TaskResult> {
+  private async executeTaskStep(
+    step: PlanStep,
+    flowParams?: Record<string, unknown>,
+  ): Promise<TaskResult> {
     const taskDef = this.resolveTaskDefinition(step.name);
-    const mergedOptions = { ...taskDef.options, ...step.options };
+    // Priority: task defaults < step options < runtime params
+    const mergedOptions = { ...taskDef.options, ...step.options, ...flowParams };
 
     this.logger.info(
       { step: step.stepNumber, task: step.name, type: step.type },
