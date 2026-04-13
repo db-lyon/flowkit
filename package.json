@@ -1,0 +1,36 @@
+{
+  "name": "flowkit",
+  "version": "0.1.0",
+  "description": "YAML-configured task/flow orchestration engine inspired by CumulusCI",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": "./dist/index.js",
+    "./config": "./dist/config/index.js",
+    "./task": "./dist/task/index.js",
+    "./flow": "./dist/flow/index.js",
+    "./dag": "./dist/dag/index.js"
+  },
+  "files": [
+    "/dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "js-yaml": "^4",
+    "zod": "^3"
+  },
+  "devDependencies": {
+    "@types/js-yaml": "^4",
+    "@types/node": "^20",
+    "typescript": "^5",
+    "vitest": "^2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
