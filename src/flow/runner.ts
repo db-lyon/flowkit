@@ -1,4 +1,3 @@
-import { execSync } from 'node:child_process';
 import type { Logger } from '../logger.js';
 import { noopLogger } from '../logger.js';
 import type { TaskDefinition, FlowDefinition, FlowStep } from '../config/schema.js';
@@ -18,7 +17,7 @@ export interface FlowRunOptions {
 
 export interface FlowStepResult {
   stepNumber: number;
-  type: 'task' | 'flow' | 'shell';
+  type: 'task' | 'flow';
   name: string;
   result?: TaskResult;
   skipped: boolean;
@@ -34,7 +33,7 @@ export interface FlowRunResult {
 
 export interface PlanStep {
   stepNumber: number;
-  type: 'task' | 'flow' | 'shell';
+  type: 'task' | 'flow';
   name: string;
   skipped: boolean;
   options?: Record<string, unknown>;
@@ -108,8 +107,8 @@ export class FlowRunner {
         return { stepNumber: key, type: 'task' as const, name: 'None', skipped: true };
       }
 
-      const name = (step.task ?? step.flow ?? step.shell)!;
-      const type = step.task ? ('task' as const) : step.flow ? ('flow' as const) : ('shell' as const);
+      const name = (step.task ?? step.flow)!;
+      const type = step.task ? ('task' as const) : ('flow' as const);
 
       return {
         stepNumber: key,
@@ -183,17 +182,7 @@ export class FlowRunner {
       try {
         let stepResult: FlowStepResult;
 
-        if (planStep.type === 'shell') {
-          const shellResult = this.executeShellStep(planStep);
-          stepResult = {
-            stepNumber: planStep.stepNumber,
-            type: 'shell',
-            name: planStep.name,
-            result: shellResult,
-            skipped: false,
-            duration: Date.now() - stepStart,
-          };
-        } else if (planStep.type === 'task') {
+        if (planStep.type === 'task') {
           const taskResult = await this.executeTaskStep(planStep);
           stepResult = {
             stepNumber: planStep.stepNumber,
@@ -275,29 +264,6 @@ export class FlowRunner {
 
     const task = await this.registry.create(taskDef.class_path, this.ctx, mergedOptions);
     return task.run();
-  }
-
-  private executeShellStep(step: PlanStep): TaskResult {
-    this.logger.info(
-      { step: step.stepNumber, shell: step.name },
-      `Executing shell: ${step.name}`,
-    );
-
-    try {
-      const output = execSync(step.name, {
-        encoding: 'utf-8',
-        stdio: ['pipe', 'pipe', 'pipe'],
-        timeout: 300_000, // 5 min
-      });
-      return { success: true, data: { output: output.trimEnd() } };
-    } catch (error) {
-      const err = error as { status?: number; stderr?: string; stdout?: string };
-      return {
-        success: false,
-        error: new Error(`Shell command failed (exit ${err.status}): ${err.stderr ?? err.stdout ?? ''}`),
-        data: { exitCode: err.status, stderr: err.stderr, stdout: err.stdout },
-      };
-    }
   }
 
   private resolveTaskDefinition(taskName: string): {

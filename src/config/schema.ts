@@ -13,16 +13,14 @@ export const FlowStepSchema = z
   .object({
     task: z.string().optional(),
     flow: z.string().optional(),
-    shell: z.string().optional(),
     options: TaskOptionsSchema.optional(),
   })
   .refine(
     (data) => {
       if (data.task === 'None') return true;
-      const count = [data.task, data.flow, data.shell].filter(Boolean).length;
-      return count === 1;
+      return (data.task && !data.flow) || (!data.task && data.flow);
     },
-    { message: 'Step must have exactly one of task, flow, or shell (or task: None to skip)' },
+    { message: 'Step must have exactly one of task or flow (or task: None to skip)' },
   );
 
 export const FlowDefinitionSchema = z.object({
