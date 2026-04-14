@@ -35,6 +35,8 @@ export type {
   FlowRunnerConfig,
   PlanStep,
 } from './flow/runner.js';
+export { resolveReferences } from './flow/references.js';
+export type { ReferenceableStep } from './flow/references.js';
 
 // DAG
 export {

@@ -391,4 +391,63 @@ describe('FlowRunner', () => {
       'afterRun',
     ]);
   });
+
+  it('resolves ${steps.<id>.<path>} references in step options', async () => {
+    class EchoTask extends BaseTask<{ input?: unknown }> {
+      get taskName() {
+        return 'echo';
+      }
+      async execute(): Promise<TaskResult> {
+        return { success: true, data: { echoed: this.options.input } };
+      }
+    }
+
+    const registry = new TaskRegistry()
+      .registerClassPath('test.Record', RecordTask as unknown as TaskConstructor)
+      .registerClassPath('test.Echo', EchoTask as unknown as TaskConstructor);
+
+    const runner = new FlowRunner({
+      tasks: {
+        record: { class_path: 'test.Record', options: {} },
+        echo: { class_path: 'test.Echo', options: {} },
+      },
+      flows: {
+        chain: {
+          description: 'Chain step outputs',
+          steps: {
+            '1': { task: 'record', options: { label: 'first' } },
+            '2': { task: 'echo', options: { input: '${steps.1.label}' } },
+            '3': { task: 'echo', options: { input: 'via ${steps.record.label}' } },
+          },
+        },
+      },
+      registry,
+      context: { __log: [] },
+    });
+
+    const result = await runner.run({ flowName: 'chain' });
+
+    expect(result.success).toBe(true);
+    expect(result.steps[1]!.result?.data).toEqual({ echoed: 'first' });
+    expect(result.steps[2]!.result?.data).toEqual({ echoed: 'via first' });
+  });
+
+  it('fails the step when a reference cannot be resolved', async () => {
+    const runner = makeRunner(
+      { echo: { class_path: 'test.Pass', options: {} } },
+      {
+        broken: {
+          description: 'References a step that does not exist',
+          steps: {
+            '1': { task: 'echo', options: { input: '${steps.missing.x}' } },
+          },
+        },
+      },
+    );
+
+    const result = await runner.run({ flowName: 'broken' });
+
+    expect(result.success).toBe(false);
+    expect(result.error?.message).toMatch(/Unresolvable step reference/);
+  });
 });

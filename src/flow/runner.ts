@@ -4,6 +4,7 @@ import type { TaskDefinition, FlowDefinition, FlowStep } from '../config/schema.
 import type { TaskResult } from '../task/base-task.js';
 import type { TaskContext } from '../task/base-task.js';
 import type { TaskRegistry } from '../task/registry.js';
+import { resolveReferences } from './references.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -188,7 +189,11 @@ export class FlowRunner {
         let stepResult: FlowStepResult;
 
         if (planStep.type === 'task') {
-          const taskResult = await this.executeTaskStep(planStep, options.params);
+          const taskResult = await this.executeTaskStep(
+            planStep,
+            options.params,
+            completedSteps,
+          );
           stepResult = {
             stepNumber: planStep.stepNumber,
             type: 'task',
@@ -261,10 +266,13 @@ export class FlowRunner {
   private async executeTaskStep(
     step: PlanStep,
     flowParams?: Record<string, unknown>,
+    completedSteps: FlowStepResult[] = [],
   ): Promise<TaskResult> {
     const taskDef = this.resolveTaskDefinition(step.name);
     // Priority: task defaults < step options < runtime params
-    const mergedOptions = { ...taskDef.options, ...step.options, ...flowParams };
+    const rawOptions = { ...taskDef.options, ...step.options, ...flowParams };
+    // Resolve ${steps.<id>.<path>} references against prior completed steps.
+    const mergedOptions = resolveReferences(rawOptions, completedSteps);
 
     this.logger.info(
       { step: step.stepNumber, task: step.name, type: step.type },
