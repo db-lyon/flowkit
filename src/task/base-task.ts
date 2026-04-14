@@ -8,11 +8,22 @@ export interface TaskContext {
   [key: string]: unknown;
 }
 
+/**
+ * Rollback record returned by a successful mutation task.
+ * The runner invokes `taskName` with `payload` (in reverse step order)
+ * when `rollback_on_failure` is enabled and a subsequent step fails.
+ */
+export interface RollbackRecord {
+  taskName: string;
+  payload: Record<string, unknown>;
+}
+
 export interface TaskResult {
   success: boolean;
   data?: Record<string, unknown>;
   error?: Error;
   duration?: number;
+  rollback?: RollbackRecord;
 }
 
 export abstract class BaseTask<TOpts = Record<string, unknown>> {

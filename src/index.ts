@@ -19,11 +19,18 @@ export type { LoadConfigOptions, LoadedConfig } from './config/loader.js';
 
 // Task
 export { BaseTask } from './task/base-task.js';
-export type { TaskContext, TaskResult } from './task/base-task.js';
+export type { TaskContext, TaskResult, RollbackRecord } from './task/base-task.js';
 export { ShellTask } from './task/shell-task.js';
 export type { ShellTaskOptions } from './task/shell-task.js';
 export { TaskRegistry } from './task/registry.js';
 export type { TaskConstructor } from './task/registry.js';
+export { AgentPromptTask } from './task/agent-prompt-task.js';
+export type { AgentPromptOptions } from './task/agent-prompt-task.js';
+export type {
+  LLMProvider,
+  LLMCompletionRequest,
+  LLMCompletionResponse,
+} from './task/llm-provider.js';
 
 // Flow
 export { FlowRunner } from './flow/runner.js';
@@ -34,9 +41,12 @@ export type {
   FlowRunnerHooks,
   FlowRunnerConfig,
   PlanStep,
+  HookPhase,
+  HookError,
+  RollbackResult,
 } from './flow/runner.js';
 export { resolveReferences } from './flow/references.js';
-export type { ReferenceableStep } from './flow/references.js';
+export type { ReferenceableStep, ReferenceContext } from './flow/references.js';
 
 // DAG
 export {

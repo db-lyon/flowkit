@@ -121,6 +121,92 @@ flows:
 
 References resolve just before the step runs, against the results of already-completed steps in the current flow. Nested flows have their own reference scope — they don't see their parent flow's steps.
 
+### Flow-level hooks
+
+A flow can attach steps that run around the main step sequence, keyed by flow outcome:
+
+```yaml
+flows:
+  deploy:
+    description: Deploy to prod
+    on_start:   [ { task: notify, options: { msg: "starting" } } ]
+    on_success: [ { task: notify, options: { msg: "done ${steps.build.version}" } } ]
+    on_failure: [ { task: notify, options: { msg: "failed: ${error.message}" } } ]
+    finally:    [ { task: cleanup } ]
+    steps:
+      1: { task: build }
+      2: { task: push }
+```
+
+- **`on_start`** runs before any step. Its failure aborts the flow before steps execute.
+- **`on_success`** runs when all steps succeed.
+- **`on_failure`** runs when any step fails. It can reference the error via the `${error.*}` namespace.
+- **`finally`** runs after either outcome, after `on_success`/`on_failure`.
+
+Hook steps share the full step execution model — same task dispatch, same option merging, same runtime params, same `${steps.X.y}` resolution. Inside `on_failure` and `finally`, the `${error.message}`, `${error.name}`, `${error.stack}`, and `${error.step}` references resolve to the failure that triggered them.
+
+Hook failures are captured in `FlowRunResult.hookErrors` but **do not** change the flow's primary success/failure outcome — a failed notifier doesn't rewrite history.
+
+### Per-step retry
+
+A step can retry itself on failure:
+
+```yaml
+steps:
+  1:
+    task: flaky_network_call
+    retries: 3            # up to 4 total attempts
+    retryDelay: 500       # ms between attempts
+    retryOn: "timeout"    # only retry when the error message contains this substring
+```
+
+Omit `retryOn` to retry on any error. The number of attempts taken appears on `FlowStepResult.attempts`.
+
+### Rollback on failure
+
+Mutating tasks may return a `rollback` record on their `TaskResult` pointing to an inverse task:
+
+```ts
+return {
+  success: true,
+  data: { label: 'MyPillar' },
+  rollback: { taskName: 'delete_actor', payload: { label: 'MyPillar' } },
+};
+```
+
+When a flow sets `rollback_on_failure: true` (or the caller passes it on `FlowRunRunOptions`) and a later step fails, the runner invokes the collected rollback records in **reverse order**, best-effort: it continues past individual failures and reports all errors in `FlowRunResult.rollback`.
+
+```yaml
+flows:
+  safe_deploy:
+    description: Deploy with rollback on failure
+    rollback_on_failure: true
+    steps:
+      1: { task: create_thing, options: { label: A } }
+      2: { task: create_thing, options: { label: B } }
+      3: { task: finalize }  # if this fails, thing:B then thing:A are rolled back
+```
+
+Rollback runs after `on_failure` and before `finally`. Nested flow steps' rollback records bubble up to the parent flow so a single `rollback_on_failure` setting covers the whole tree.
+
+### `agent_prompt` — LLM step
+
+When a `LLMProvider` is attached to the context under `ctx.llm`, the built-in `agent_prompt` task invokes it:
+
+```yaml
+steps:
+  1:
+    task: agent_prompt
+    options:
+      system: "You are a deployment triage agent."
+      prompt: "Last error: ${error.message}. Suggest a fix."
+      model: claude-opus-4-6
+      maxTokens: 512
+      schema: { type: object, properties: { fix: { type: string } } }  # optional
+```
+
+Returns `{ text, parsed?, usage? }`. Provider failures become step failures; missing provider is a clear error.
+
 ## Config layering
 
 `loadConfig()` merges up to four layers, left to right:

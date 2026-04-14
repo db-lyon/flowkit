@@ -1,18 +1,17 @@
 /**
- * Step reference resolution.
+ * Reference resolution for flow option values.
  *
- * Option values may contain `${steps.<id>.<path>}` references that resolve
- * against previously completed steps in the same flow run.
+ * Option values may contain two reference namespaces, delimited by `${...}`:
  *
- *   levelPath: "${steps.1.path}"           // whole-value → raw value (preserves type)
- *   message:  "created ${steps.build.id}"  // embedded → stringified
+ *   ${steps.<id>.<path>}  → value from a previously completed step
+ *   ${error.<path>}       → error info, only inside on_failure / finally hooks
  *
  * `<id>` is a step number ("3") or a task name ("level.place_actor"). Task
- * names match the most recently completed step with that name.
+ * names match the most recently completed step with that name. Longest-prefix
+ * match wins when a task name shares a prefix with a path segment.
  *
- * When both a task name and a path start with the same prefix (e.g. the task
- * `level.place_actor` and a data field `place_actor`), the longest matching
- * id wins — so step ids beat path fragments.
+ * A reference that fills the entire string is replaced with the raw value
+ * (preserving object/array/number types). Embedded references are stringified.
  */
 
 export interface ReferenceableStep {
@@ -21,48 +20,60 @@ export interface ReferenceableStep {
   result?: { data?: unknown };
 }
 
-const WHOLE_VALUE = /^\$\{steps\.([^}]+)\}$/;
-const EMBEDDED = /\$\{steps\.([^}]+)\}/g;
+export interface ReferenceContext {
+  steps: ReferenceableStep[];
+  /** Present inside on_failure / finally hooks. */
+  error?: { message: string; name: string; stack?: string; step?: string };
+}
 
-export function resolveReferences<T>(value: T, steps: ReferenceableStep[]): T {
+const WHOLE_VALUE = /^\$\{(steps|error)\.([^}]+)\}$/;
+const EMBEDDED = /\$\{(steps|error)\.([^}]+)\}/g;
+
+export function resolveReferences<T>(value: T, ctx: ReferenceContext): T {
   if (value == null) return value;
-  if (typeof value === 'string') return resolveString(value, steps) as T;
+  if (typeof value === 'string') return resolveString(value, ctx) as T;
   if (Array.isArray(value)) {
-    return value.map((v) => resolveReferences(v, steps)) as unknown as T;
+    return value.map((v) => resolveReferences(v, ctx)) as unknown as T;
   }
   if (typeof value === 'object') {
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
-      out[k] = resolveReferences(v, steps);
+      out[k] = resolveReferences(v, ctx);
     }
     return out as T;
   }
   return value;
 }
 
-function resolveString(str: string, steps: ReferenceableStep[]): unknown {
+function resolveString(str: string, ctx: ReferenceContext): unknown {
   const whole = str.match(WHOLE_VALUE);
-  if (whole) return resolveRef(whole[1]!, steps);
+  if (whole) return resolveRef(whole[1]!, whole[2]!, ctx);
 
-  // No embedded references — return the string untouched.
-  if (!str.includes('${steps.')) return str;
+  if (!str.includes('${')) return str;
 
-  return str.replace(EMBEDDED, (_match, ref: string) => {
-    const v = resolveRef(ref, steps);
+  return str.replace(EMBEDDED, (_match, ns: string, ref: string) => {
+    const v = resolveRef(ns, ref, ctx);
     if (v == null) return '';
     if (typeof v === 'object') return JSON.stringify(v);
     return String(v);
   });
 }
 
-function resolveRef(ref: string, steps: ReferenceableStep[]): unknown {
-  const segments = ref.split('.');
+function resolveRef(namespace: string, ref: string, ctx: ReferenceContext): unknown {
+  if (namespace === 'error') {
+    if (!ctx.error) {
+      throw new Error(
+        `\${error.${ref}} referenced outside on_failure/finally — error context not available`,
+      );
+    }
+    return getPath(ctx.error, ref.split('.'));
+  }
 
-  // Try the longest prefix first so task names containing dots
-  // (e.g. "level.place_actor") win over single-segment ids.
+  // steps namespace
+  const segments = ref.split('.');
   for (let i = segments.length; i >= 1; i--) {
     const idCandidate = segments.slice(0, i).join('.');
-    const match = findStep(idCandidate, steps);
+    const match = findStep(idCandidate, ctx.steps);
     if (match) {
       return getPath(match.result?.data, segments.slice(i));
     }

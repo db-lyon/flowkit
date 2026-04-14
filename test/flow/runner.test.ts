@@ -451,3 +451,455 @@ describe('FlowRunner', () => {
     expect(result.error?.message).toMatch(/Unresolvable step reference/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 1 — flow hooks + retry
+// ---------------------------------------------------------------------------
+
+describe('FlowRunner — flow-level hooks', () => {
+  it('runs on_start before steps and on_success after', async () => {
+    const log: string[] = [];
+    class LogTask extends BaseTask<{ label: string }> {
+      get taskName() { return 'log'; }
+      async execute(): Promise<TaskResult> {
+        log.push(this.options.label);
+        return { success: true, data: { label: this.options.label } };
+      }
+    }
+    const registry = new TaskRegistry().registerClassPath(
+      'test.Log',
+      LogTask as unknown as TaskConstructor,
+    );
+    const runner = new FlowRunner({
+      tasks: { log: { class_path: 'test.Log', options: {} } },
+      flows: {
+        f: {
+          description: 'hook flow',
+          on_start: [{ task: 'log', options: { label: 'start' } }],
+          on_success: [{ task: 'log', options: { label: 'success' } }],
+          finally: [{ task: 'log', options: { label: 'finally' } }],
+          steps: {
+            '1': { task: 'log', options: { label: 'step1' } },
+            '2': { task: 'log', options: { label: 'step2' } },
+          },
+        },
+      },
+      registry,
+      context: {},
+    });
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(true);
+    expect(log).toEqual(['start', 'step1', 'step2', 'success', 'finally']);
+  });
+
+  it('runs on_failure instead of on_success when a step fails', async () => {
+    const log: string[] = [];
+    class LogTask extends BaseTask<{ label: string }> {
+      get taskName() { return 'log'; }
+      async execute(): Promise<TaskResult> {
+        log.push(this.options.label);
+        return { success: true };
+      }
+    }
+    const registry = new TaskRegistry()
+      .registerClassPath('test.Log', LogTask as unknown as TaskConstructor)
+      .registerClassPath('test.Fail', FailTask as unknown as TaskConstructor);
+    const runner = new FlowRunner({
+      tasks: {
+        log: { class_path: 'test.Log', options: {} },
+        fail: { class_path: 'test.Fail', options: {} },
+      },
+      flows: {
+        f: {
+          description: 'failure flow',
+          on_success: [{ task: 'log', options: { label: 'success' } }],
+          on_failure: [{ task: 'log', options: { label: 'failure' } }],
+          finally: [{ task: 'log', options: { label: 'finally' } }],
+          steps: {
+            '1': { task: 'fail' },
+          },
+        },
+      },
+      registry,
+      context: {},
+    });
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(false);
+    expect(log).toEqual(['failure', 'finally']);
+  });
+
+  it('exposes ${error.message} inside on_failure steps', async () => {
+    let captured: unknown;
+    class CaptureTask extends BaseTask<{ msg: string }> {
+      get taskName() { return 'capture'; }
+      async execute(): Promise<TaskResult> {
+        captured = this.options.msg;
+        return { success: true };
+      }
+    }
+    const registry = new TaskRegistry()
+      .registerClassPath('test.Fail', FailTask as unknown as TaskConstructor)
+      .registerClassPath('test.Capture', CaptureTask as unknown as TaskConstructor);
+    const runner = new FlowRunner({
+      tasks: {
+        fail: { class_path: 'test.Fail', options: {} },
+        capture: { class_path: 'test.Capture', options: {} },
+      },
+      flows: {
+        f: {
+          description: 'error ref',
+          on_failure: [{ task: 'capture', options: { msg: 'got: ${error.message}' } }],
+          steps: { '1': { task: 'fail' } },
+        },
+      },
+      registry,
+      context: {},
+    });
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(false);
+    expect(captured).toBe('got: intentional');
+  });
+
+  it('captures hook failures in hookErrors without changing primary outcome', async () => {
+    const runner = makeRunner(
+      {
+        pass: { class_path: 'test.Pass', options: {} },
+        fail: { class_path: 'test.Fail', options: {} },
+      },
+      {
+        f: {
+          description: 'hook fail',
+          on_success: [{ task: 'fail' }],
+          finally: [{ task: 'fail' }],
+          steps: { '1': { task: 'pass' } },
+        },
+      },
+    );
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(true);
+    expect(result.hookErrors).toHaveLength(2);
+    expect(result.hookErrors![0]!.phase).toBe('on_success');
+    expect(result.hookErrors![1]!.phase).toBe('finally');
+  });
+
+  it('on_start failure aborts the flow before steps run', async () => {
+    const log: string[] = [];
+    class LogTask extends BaseTask<{ label: string }> {
+      get taskName() { return 'log'; }
+      async execute(): Promise<TaskResult> {
+        log.push(this.options.label);
+        return { success: true };
+      }
+    }
+    const registry = new TaskRegistry()
+      .registerClassPath('test.Log', LogTask as unknown as TaskConstructor)
+      .registerClassPath('test.Fail', FailTask as unknown as TaskConstructor);
+    const runner = new FlowRunner({
+      tasks: {
+        log: { class_path: 'test.Log', options: {} },
+        fail: { class_path: 'test.Fail', options: {} },
+      },
+      flows: {
+        f: {
+          description: 'on_start failure',
+          on_start: [{ task: 'fail' }],
+          on_failure: [{ task: 'log', options: { label: 'failure' } }],
+          steps: { '1': { task: 'log', options: { label: 'step' } } },
+        },
+      },
+      registry,
+      context: {},
+    });
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(false);
+    expect(log).toEqual(['failure']); // step1 never ran
+  });
+});
+
+describe('FlowRunner — per-step retry', () => {
+  it('retries a failing step up to retries+1 attempts', async () => {
+    let calls = 0;
+    class FlakyTask extends BaseTask {
+      get taskName() { return 'flaky'; }
+      async execute(): Promise<TaskResult> {
+        calls++;
+        if (calls < 3) return { success: false, error: new Error('transient') };
+        return { success: true, data: { ok: true } };
+      }
+    }
+    const registry = new TaskRegistry().registerClassPath(
+      'test.Flaky',
+      FlakyTask as unknown as TaskConstructor,
+    );
+    const runner = new FlowRunner({
+      tasks: { flaky: { class_path: 'test.Flaky', options: {} } },
+      flows: {
+        f: {
+          description: 'retry',
+          steps: { '1': { task: 'flaky', retries: 2 } },
+        },
+      },
+      registry,
+      context: {},
+    });
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(true);
+    expect(calls).toBe(3);
+    expect(result.steps[0]!.attempts).toBe(3);
+  });
+
+  it('honors retryOn substring match', async () => {
+    let calls = 0;
+    class TypedFailTask extends BaseTask {
+      get taskName() { return 'tf'; }
+      async execute(): Promise<TaskResult> {
+        calls++;
+        return { success: false, error: new Error('permanent auth denied') };
+      }
+    }
+    const registry = new TaskRegistry().registerClassPath(
+      'test.TF',
+      TypedFailTask as unknown as TaskConstructor,
+    );
+    const runner = new FlowRunner({
+      tasks: { tf: { class_path: 'test.TF', options: {} } },
+      flows: {
+        f: {
+          description: 'retryOn',
+          steps: { '1': { task: 'tf', retries: 5, retryOn: 'transient' } },
+        },
+      },
+      registry,
+      context: {},
+    });
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(false);
+    expect(calls).toBe(1); // retryOn doesn't match, no retry
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Phase 2 — rollback
+// ---------------------------------------------------------------------------
+
+describe('FlowRunner — rollback on failure', () => {
+  it('invokes rollback records in reverse order when a later step fails', async () => {
+    const log: string[] = [];
+    class CreateTask extends BaseTask<{ label: string }> {
+      get taskName() { return 'create'; }
+      async execute(): Promise<TaskResult> {
+        log.push(`create:${this.options.label}`);
+        return {
+          success: true,
+          data: { label: this.options.label },
+          rollback: {
+            taskName: 'remove',
+            payload: { label: this.options.label },
+          },
+        };
+      }
+    }
+    class RemoveTask extends BaseTask<{ label: string }> {
+      get taskName() { return 'remove'; }
+      async execute(): Promise<TaskResult> {
+        log.push(`remove:${this.options.label}`);
+        return { success: true };
+      }
+    }
+    const registry = new TaskRegistry()
+      .registerClassPath('test.Create', CreateTask as unknown as TaskConstructor)
+      .registerClassPath('test.Remove', RemoveTask as unknown as TaskConstructor)
+      .registerClassPath('test.Fail', FailTask as unknown as TaskConstructor);
+    const runner = new FlowRunner({
+      tasks: {
+        create: { class_path: 'test.Create', options: {} },
+        remove: { class_path: 'test.Remove', options: {} },
+        fail: { class_path: 'test.Fail', options: {} },
+      },
+      flows: {
+        f: {
+          description: 'rollback',
+          rollback_on_failure: true,
+          steps: {
+            '1': { task: 'create', options: { label: 'a' } },
+            '2': { task: 'create', options: { label: 'b' } },
+            '3': { task: 'fail' },
+          },
+        },
+      },
+      registry,
+      context: {},
+    });
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(false);
+    expect(log).toEqual(['create:a', 'create:b', 'remove:b', 'remove:a']);
+    expect(result.rollback).toEqual({ attempted: 2, succeeded: 2, errors: [] });
+  });
+
+  it('continues rollback past individual inverse failures', async () => {
+    const log: string[] = [];
+    class CreateTask extends BaseTask<{ label: string }> {
+      get taskName() { return 'create'; }
+      async execute(): Promise<TaskResult> {
+        log.push(`create:${this.options.label}`);
+        return {
+          success: true,
+          rollback: {
+            taskName: this.options.label === 'b' ? 'bad_remove' : 'remove',
+            payload: { label: this.options.label },
+          },
+        };
+      }
+    }
+    class RemoveTask extends BaseTask<{ label: string }> {
+      get taskName() { return 'remove'; }
+      async execute(): Promise<TaskResult> {
+        log.push(`remove:${this.options.label}`);
+        return { success: true };
+      }
+    }
+    class BadRemoveTask extends BaseTask {
+      get taskName() { return 'bad_remove'; }
+      async execute(): Promise<TaskResult> {
+        log.push('bad_remove');
+        return { success: false, error: new Error('cannot undo') };
+      }
+    }
+    const registry = new TaskRegistry()
+      .registerClassPath('test.Create', CreateTask as unknown as TaskConstructor)
+      .registerClassPath('test.Remove', RemoveTask as unknown as TaskConstructor)
+      .registerClassPath('test.BadRemove', BadRemoveTask as unknown as TaskConstructor)
+      .registerClassPath('test.Fail', FailTask as unknown as TaskConstructor);
+    const runner = new FlowRunner({
+      tasks: {
+        create: { class_path: 'test.Create', options: {} },
+        remove: { class_path: 'test.Remove', options: {} },
+        bad_remove: { class_path: 'test.BadRemove', options: {} },
+        fail: { class_path: 'test.Fail', options: {} },
+      },
+      flows: {
+        f: {
+          description: 'rollback-with-errors',
+          rollback_on_failure: true,
+          steps: {
+            '1': { task: 'create', options: { label: 'a' } },
+            '2': { task: 'create', options: { label: 'b' } },
+            '3': { task: 'fail' },
+          },
+        },
+      },
+      registry,
+      context: {},
+    });
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(false);
+    expect(log).toEqual(['create:a', 'create:b', 'bad_remove', 'remove:a']);
+    expect(result.rollback!.attempted).toBe(2);
+    expect(result.rollback!.succeeded).toBe(1);
+    expect(result.rollback!.errors).toHaveLength(1);
+  });
+
+  it('does not roll back when rollback_on_failure is false', async () => {
+    const log: string[] = [];
+    class CreateTask extends BaseTask<{ label: string }> {
+      get taskName() { return 'create'; }
+      async execute(): Promise<TaskResult> {
+        log.push(`create:${this.options.label}`);
+        return {
+          success: true,
+          rollback: { taskName: 'remove', payload: { label: this.options.label } },
+        };
+      }
+    }
+    class RemoveTask extends BaseTask {
+      get taskName() { return 'remove'; }
+      async execute(): Promise<TaskResult> {
+        log.push('remove'); // should never fire
+        return { success: true };
+      }
+    }
+    const registry = new TaskRegistry()
+      .registerClassPath('test.Create', CreateTask as unknown as TaskConstructor)
+      .registerClassPath('test.Remove', RemoveTask as unknown as TaskConstructor)
+      .registerClassPath('test.Fail', FailTask as unknown as TaskConstructor);
+    const runner = new FlowRunner({
+      tasks: {
+        create: { class_path: 'test.Create', options: {} },
+        remove: { class_path: 'test.Remove', options: {} },
+        fail: { class_path: 'test.Fail', options: {} },
+      },
+      flows: {
+        f: {
+          description: 'no-rollback',
+          steps: {
+            '1': { task: 'create', options: { label: 'a' } },
+            '2': { task: 'fail' },
+          },
+        },
+      },
+      registry,
+      context: {},
+    });
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(false);
+    expect(log).toEqual(['create:a']);
+    expect(result.rollback).toBeUndefined();
+  });
+
+  it('finally runs after rollback', async () => {
+    const log: string[] = [];
+    class CreateTask extends BaseTask<{ label: string }> {
+      get taskName() { return 'create'; }
+      async execute(): Promise<TaskResult> {
+        log.push(`create:${this.options.label}`);
+        return {
+          success: true,
+          rollback: { taskName: 'remove', payload: { label: this.options.label } },
+        };
+      }
+    }
+    class RemoveTask extends BaseTask<{ label: string }> {
+      get taskName() { return 'remove'; }
+      async execute(): Promise<TaskResult> {
+        log.push(`remove:${this.options.label}`);
+        return { success: true };
+      }
+    }
+    class TickTask extends BaseTask<{ label: string }> {
+      get taskName() { return 'tick'; }
+      async execute(): Promise<TaskResult> {
+        log.push(`tick:${this.options.label}`);
+        return { success: true };
+      }
+    }
+    const registry = new TaskRegistry()
+      .registerClassPath('test.Create', CreateTask as unknown as TaskConstructor)
+      .registerClassPath('test.Remove', RemoveTask as unknown as TaskConstructor)
+      .registerClassPath('test.Tick', TickTask as unknown as TaskConstructor)
+      .registerClassPath('test.Fail', FailTask as unknown as TaskConstructor);
+    const runner = new FlowRunner({
+      tasks: {
+        create: { class_path: 'test.Create', options: {} },
+        remove: { class_path: 'test.Remove', options: {} },
+        tick: { class_path: 'test.Tick', options: {} },
+        fail: { class_path: 'test.Fail', options: {} },
+      },
+      flows: {
+        f: {
+          description: 'rollback-then-finally',
+          rollback_on_failure: true,
+          finally: [{ task: 'tick', options: { label: 'final' } }],
+          steps: {
+            '1': { task: 'create', options: { label: 'a' } },
+            '2': { task: 'fail' },
+          },
+        },
+      },
+      registry,
+      context: {},
+    });
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(false);
+    expect(log).toEqual(['create:a', 'remove:a', 'tick:final']);
+  });
+});
