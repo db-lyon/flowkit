@@ -91,6 +91,36 @@ flows:
           # notify: true is inherited from task defaults
 ```
 
+Runtime parameters passed to `FlowRunner.run({ params })` merge on top with the highest priority (**task defaults < step overrides < runtime params**).
+
+### Step references
+
+Option values may reference the output of earlier steps in the same flow using `${steps.<id>.<path>}`:
+
+```yaml
+flows:
+  chain:
+    description: Pass one step's output into the next
+    steps:
+      1:
+        task: build
+        options:
+          target: plugin
+      2:
+        task: deploy
+        options:
+          artifact: ${steps.1.path}            # whole-value → raw type preserved
+          message:  "deployed ${steps.build.version}"  # embedded → stringified
+```
+
+- **`<id>`** is a step number (`1`) or a task name (`build`, `level.place_actor`). Task names with dots are matched longest-prefix-first.
+- **`<path>`** is a dot path into the step's `result.data`.
+- When a task name appears in multiple steps, references resolve to the **most recently completed** one.
+- A reference that fills the entire string (`"${steps.1.path}"`) is replaced with the raw value, so objects and arrays round-trip. References embedded inside a larger string are stringified.
+- References that can't be resolved throw and fail the step.
+
+References resolve just before the step runs, against the results of already-completed steps in the current flow. Nested flows have their own reference scope — they don't see their parent flow's steps.
+
 ## Config layering
 
 `loadConfig()` merges up to four layers, left to right:
