@@ -2,8 +2,7 @@ name: Publish to npm
 
 on:
   push:
-    tags:
-      - "v*"
+    branches: [main]
 
 jobs:
   publish:
@@ -18,8 +17,26 @@ jobs:
           node-version: 20
           registry-url: https://registry.npmjs.org
 
+      - name: Check if version changed
+        id: version
+        run: |
+          LOCAL=$(node -p "require('./package.json').version")
+          PUBLISHED=$(npm view @db-lyon/flowkit version 2>/dev/null || echo "0.0.0")
+          echo "local=$LOCAL" >> "$GITHUB_OUTPUT"
+          echo "published=$PUBLISHED" >> "$GITHUB_OUTPUT"
+          if [ "$LOCAL" != "$PUBLISHED" ]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - run: npm ci
+        if: steps.version.outputs.changed == 'true'
+
       - run: npm test
+        if: steps.version.outputs.changed == 'true'
+
       - run: npm publish --access=public
+        if: steps.version.outputs.changed == 'true'
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
