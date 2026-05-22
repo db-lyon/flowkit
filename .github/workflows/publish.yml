@@ -9,6 +9,10 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      # OIDC trusted publisher: npm CLI exchanges this for a short-lived
+      # publish token at npmjs.org. The trusted publisher binding is
+      # configured on the npm side (workflow filename + repo + branch).
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -30,13 +34,17 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # Trusted publishing requires npm CLI 11.5.1+. The setup-node action
+      # ships an older npm with Node 20, so install a modern one explicitly.
+      - name: Upgrade npm for trusted publishing
+        if: steps.version.outputs.changed == 'true'
+        run: npm install -g npm@latest
+
       - run: npm ci
         if: steps.version.outputs.changed == 'true'
 
       - run: npm test
         if: steps.version.outputs.changed == 'true'
 
-      - run: npm publish --access=public
+      - run: npm publish --access=public --provenance
         if: steps.version.outputs.changed == 'true'
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
