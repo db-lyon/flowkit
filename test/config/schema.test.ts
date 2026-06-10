@@ -43,6 +43,21 @@ describe('FlowStepSchema', () => {
     expect(result.task).toBeUndefined();
   });
 
+  it('accepts a `when` condition as string or boolean', () => {
+    expect(FlowStepSchema.parse({ task: 'deploy', when: 'org.scratch' }).when).toBe('org.scratch');
+    expect(FlowStepSchema.parse({ task: 'deploy', when: false }).when).toBe(false);
+  });
+
+  it('accepts ignore_failure', () => {
+    expect(FlowStepSchema.parse({ task: 'deploy', ignore_failure: true }).ignore_failure).toBe(true);
+  });
+
+  it('leaves when/ignore_failure undefined by default', () => {
+    const result = FlowStepSchema.parse({ task: 'deploy' });
+    expect(result.when).toBeUndefined();
+    expect(result.ignore_failure).toBeUndefined();
+  });
+
   it('accepts task: None (skip sentinel)', () => {
     expect(FlowStepSchema.parse({ task: 'None' }).task).toBe('None');
   });

@@ -903,3 +903,205 @@ describe('FlowRunner — rollback on failure', () => {
     expect(log).toEqual(['create:a', 'remove:a', 'tick:final']);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Phase 3 — sub-flow option overrides, when, ignore_failure, plan expansion
+// ---------------------------------------------------------------------------
+
+describe('FlowRunner — sub-flow option overrides', () => {
+  it('threads an enclosing flow step’s overrides into a nested flow task', async () => {
+    const log: string[] = [];
+    const runner = makeRunner(
+      { rec: { class_path: 'test.Record', options: { label: 'default' } } },
+      {
+        inner: { description: 'Inner', steps: { '1': { task: 'rec' } } },
+        outer: {
+          description: 'Outer',
+          steps: { '1': { flow: 'inner', options: { rec: { label: 'injected' } } } },
+        },
+      },
+      { __log: log },
+    );
+    const result = await runner.run({ flowName: 'outer' });
+    expect(result.success).toBe(true);
+    expect(log).toEqual(['injected']); // previously ['default'] — overrides were dropped
+  });
+
+  it('precedence: task default < parent override < step inline < runtime params', async () => {
+    const run = async (params?: Record<string, unknown>): Promise<string[]> => {
+      const log: string[] = [];
+      const runner = makeRunner(
+        { rec: { class_path: 'test.Record', options: { label: 'default' } } },
+        {
+          inner: {
+            description: 'Inner',
+            steps: {
+              '1': { task: 'rec' }, // takes the parent override
+              '2': { task: 'rec', options: { label: 'inline' } }, // inline beats parent override
+            },
+          },
+          outer: {
+            description: 'Outer',
+            steps: { '1': { flow: 'inner', options: { rec: { label: 'parent' } } } },
+          },
+        },
+        { __log: log },
+      );
+      await runner.run({ flowName: 'outer', params });
+      return log;
+    };
+
+    expect(await run()).toEqual(['parent', 'inline']);
+    expect(await run({ label: 'runtime' })).toEqual(['runtime', 'runtime']); // params win over all
+  });
+});
+
+describe('FlowRunner — when conditions', () => {
+  it('skips a step when `when` is the literal false and runs when true', async () => {
+    const log: string[] = [];
+    const runner = makeRunner(
+      { rec: { class_path: 'test.Record', options: {} } },
+      {
+        f: {
+          description: 'when',
+          steps: {
+            '1': { task: 'rec', options: { label: 'a' } },
+            '2': { task: 'rec', options: { label: 'b' }, when: false },
+            '3': { task: 'rec', options: { label: 'c' }, when: true },
+          },
+        },
+      },
+      { __log: log },
+    );
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(true);
+    expect(log).toEqual(['a', 'c']);
+    expect(result.steps[1]!.skipped).toBe(true);
+    expect(result.steps[1]!.skipReason).toBe('when');
+  });
+
+  it('evaluates a string `when` via built-in ${...} reference truthiness', async () => {
+    const log: string[] = [];
+    const runner = makeRunner(
+      { rec: { class_path: 'test.Record', options: {} } },
+      {
+        f: {
+          description: 'when-ref',
+          steps: {
+            '1': { task: 'rec', options: { label: 'on' } },
+            '2': { task: 'rec', options: { label: 'ran' }, when: '${steps.1.label}' }, // 'on' truthy
+            '3': { task: 'rec', options: { label: 'gone' }, when: '${steps.1.missing}' }, // undefined → falsy
+          },
+        },
+      },
+      { __log: log },
+    );
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(true);
+    expect(log).toEqual(['on', 'ran']);
+    expect(result.steps[2]!.skipReason).toBe('when');
+  });
+
+  it('uses a custom conditionEvaluator for string `when`', async () => {
+    const log: string[] = [];
+    const runner = new FlowRunner({
+      tasks: { rec: { class_path: 'test.Record', options: {} } },
+      flows: {
+        f: {
+          description: 'ce',
+          steps: {
+            '1': { task: 'rec', options: { label: 'prod' }, when: 'env == prod' },
+            '2': { task: 'rec', options: { label: 'dev' }, when: 'env == dev' },
+          },
+        },
+      },
+      registry: createRegistry(),
+      context: { __log: log },
+      conditionEvaluator: (expr) => expr === 'env == prod',
+    });
+    await runner.run({ flowName: 'f' });
+    expect(log).toEqual(['prod']);
+  });
+});
+
+describe('FlowRunner — ignore_failure', () => {
+  it('records a failed step but continues the flow', async () => {
+    const log: string[] = [];
+    const runner = makeRunner(
+      {
+        rec: { class_path: 'test.Record', options: {} },
+        fail: { class_path: 'test.Fail', options: {} },
+      },
+      {
+        f: {
+          description: 'ignore',
+          steps: {
+            '1': { task: 'rec', options: { label: 'before' } },
+            '2': { task: 'fail', ignore_failure: true },
+            '3': { task: 'rec', options: { label: 'after' } },
+          },
+        },
+      },
+      { __log: log },
+    );
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(true);
+    expect(log).toEqual(['before', 'after']);
+    expect(result.steps[1]!.result?.success).toBe(false);
+    expect(result.steps[1]!.ignoredFailure).toBe(true);
+  });
+
+  it('without ignore_failure the same flow aborts', async () => {
+    const log: string[] = [];
+    const runner = makeRunner(
+      {
+        rec: { class_path: 'test.Record', options: {} },
+        fail: { class_path: 'test.Fail', options: {} },
+      },
+      {
+        f: {
+          description: 'no-ignore',
+          steps: {
+            '1': { task: 'rec', options: { label: 'before' } },
+            '2': { task: 'fail' },
+            '3': { task: 'rec', options: { label: 'after' } },
+          },
+        },
+      },
+      { __log: log },
+    );
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(false);
+    expect(log).toEqual(['before']);
+  });
+});
+
+describe('FlowRunner — plan expansion', () => {
+  it('expands nested flows with hierarchical paths only when opted in', async () => {
+    const runner = makeRunner(
+      { rec: { class_path: 'test.Record', options: {} } },
+      {
+        inner: {
+          description: 'Inner',
+          steps: { '1': { task: 'rec' }, '2': { task: 'rec' } },
+        },
+        outer: {
+          description: 'Outer',
+          steps: { '1': { task: 'rec' }, '2': { flow: 'inner' } },
+        },
+      },
+    );
+
+    const flat = await runner.run({ flowName: 'outer', plan: true });
+    expect(flat.steps).toHaveLength(2); // default unchanged: one line per flow step
+    expect((flat.steps[1] as unknown as { path?: string }).path).toBeUndefined();
+
+    const expanded = await runner.run({ flowName: 'outer', plan: true, expandNestedFlows: true });
+    expect(expanded.steps.map((s) => (s as unknown as { path?: string }).path)).toEqual([
+      '1',
+      '2',
+      '2/1',
+      '2/2',
+    ]);
+  });
+});

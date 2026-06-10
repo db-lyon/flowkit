@@ -182,6 +182,54 @@ flows:
       2: { task: deploy }
 ```
 
+A flow step's `options` override the options of tasks **inside** the nested
+flow, keyed by task name. Precedence, low → high: task default → enclosing-flow
+override → step's own inline options → runtime `params`.
+
+```yaml
+release:
+  steps:
+    1:
+      flow: ci
+      options:
+        test: { coverage: 90 } # overrides the `test` task's options inside `ci`
+    2: { task: deploy }
+```
+
+### Conditional steps (`when`)
+
+A step runs only when its `when` is truthy. It accepts a boolean, or a string
+expression evaluated at run time. With no `conditionEvaluator` configured, a
+string is resolved for `${...}` references and tested for truthiness; supply a
+`conditionEvaluator` to plug in a real expression language. A falsy result skips
+the step (`skipReason: 'when'`) without failing the flow.
+
+```yaml
+steps:
+  1: { task: build }
+  2: { task: deploy, when: '${steps.1.shouldDeploy}' }
+  3: { task: notify, when: false }
+```
+
+```typescript
+new FlowRunner({
+  // ...
+  conditionEvaluator: (expr, ctx) => evalMyDsl(expr, ctx), // ctx: { steps, params, context, error }
+});
+```
+
+### Continue on failure (`ignore_failure`)
+
+By default any failed step aborts the flow. Mark a step `ignore_failure: true`
+to record the failure but keep going (the step result has `ignoredFailure: true`).
+
+```yaml
+steps:
+  1: { task: deploy }
+  2: { task: publish_release_notes, ignore_failure: true }
+  3: { task: announce }
+```
+
 ### Skip steps
 
 Skip by task name or step number:
@@ -208,6 +256,13 @@ const result = await runner.run({ flowName: 'ci', plan: true });
 result.steps.forEach(s =>
   console.log(`${s.stepNumber}: [${s.type}] ${s.name}${s.skipped ? ' (skip)' : ''}`)
 );
+```
+
+Pass `expandNestedFlows: true` to recursively expand nested-flow steps into
+their child steps, each annotated with a hierarchical `path` (e.g. `2/1`):
+
+```typescript
+await runner.run({ flowName: 'release', plan: true, expandNestedFlows: true });
 ```
 
 ### Lifecycle hooks

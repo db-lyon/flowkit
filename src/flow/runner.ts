@@ -12,6 +12,13 @@ import { resolveReferences, type ReferenceContext } from './references.js';
 
 export type HookPhase = 'on_start' | 'on_success' | 'on_failure' | 'finally';
 
+/**
+ * Per-task option overrides injected by an enclosing flow step, keyed by the
+ * inner task (or flow) name. When a flow step carries `options`, those options
+ * are interpreted as this map and threaded down into the nested flow.
+ */
+export type ParentOptions = Record<string, Record<string, unknown>>;
+
 export interface FlowRunOptions {
   flowName: string;
   skip?: string[];
@@ -20,7 +27,31 @@ export interface FlowRunOptions {
   params?: Record<string, unknown>;
   /** If true, invoke rollback records from completed steps in reverse order on failure. */
   rollback_on_failure?: boolean;
+  /**
+   * Plan mode only: recursively expand nested-flow steps into their child steps
+   * (each annotated with a hierarchical `path`). Default false preserves the
+   * flat, one-line-per-flow-step plan.
+   */
+  expandNestedFlows?: boolean;
 }
+
+/** Context handed to a `conditionEvaluator` when resolving a string `when:`. */
+export interface ConditionContext {
+  steps: FlowStepResult[];
+  params?: Record<string, unknown>;
+  context: TaskContext;
+  error?: { message: string; name: string; stack?: string; step?: string };
+}
+
+/**
+ * Evaluates a string `when:` expression to a boolean. Supply one to use a real
+ * expression language (e.g. jinja-style with project/org context). When absent,
+ * the runner falls back to resolving `${...}` references and testing truthiness.
+ */
+export type ConditionEvaluator = (
+  expression: string,
+  ctx: ConditionContext,
+) => boolean | Promise<boolean>;
 
 export interface FlowStepResult {
   stepNumber: number;
@@ -31,6 +62,10 @@ export interface FlowStepResult {
   duration: number;
   /** Number of attempts including the first try (≥1 when executed). */
   attempts?: number;
+  /** Why the step was skipped: 'static' (skip list / task: None) or 'when' (condition false). */
+  skipReason?: 'static' | 'when';
+  /** True when the step failed but `ignore_failure` let the flow continue. */
+  ignoredFailure?: boolean;
 }
 
 export interface HookError {
@@ -65,8 +100,16 @@ export interface PlanStep {
   retries?: number;
   retryDelay?: number;
   retryOn?: string;
+  /** Conditional execution — evaluated at run time, so plan reports it unresolved. */
+  when?: string | boolean;
+  /** Whether a failure of this step is tolerated. */
+  ignore_failure?: boolean;
   /** For hook steps: the phase they belong to. Undefined for main steps. */
   phase?: HookPhase;
+  /** Hierarchical id (e.g. "2/1") — only set when a plan expands nested flows. */
+  path?: string;
+  /** Nesting depth — 0 for top-level, increments per expanded nested flow. */
+  depth?: number;
 }
 
 export interface FlowRunnerHooks {
@@ -84,6 +127,8 @@ export interface FlowRunnerConfig {
   context: TaskContext;
   hooks?: FlowRunnerHooks;
   logger?: Logger;
+  /** Optional evaluator for string `when:` expressions. */
+  conditionEvaluator?: ConditionEvaluator;
 }
 
 // ---------------------------------------------------------------------------
@@ -97,6 +142,7 @@ export class FlowRunner {
   private registry: TaskRegistry;
   private ctx: TaskContext;
   private hooks: FlowRunnerHooks;
+  private conditionEvaluator?: ConditionEvaluator;
   private runDepth = 0;
 
   constructor(config: FlowRunnerConfig) {
@@ -105,14 +151,22 @@ export class FlowRunner {
     this.flows = config.flows;
     this.registry = config.registry;
     this.hooks = config.hooks ?? {};
+    this.conditionEvaluator = config.conditionEvaluator;
     this.ctx = { ...config.context, registry: config.registry };
   }
 
   async run(options: FlowRunOptions): Promise<FlowRunResult> {
+    return this.runWith(options, {});
+  }
+
+  private async runWith(
+    options: FlowRunOptions,
+    parentOptions: ParentOptions,
+  ): Promise<FlowRunResult> {
     this.runDepth++;
     const isTopLevel = this.runDepth === 1;
     try {
-      return await this.executeFlow(options, isTopLevel);
+      return await this.executeFlow(options, isTopLevel, parentOptions);
     } finally {
       this.runDepth--;
     }
@@ -141,6 +195,8 @@ export class FlowRunner {
       retries: step.retries,
       retryDelay: step.retryDelay,
       retryOn: step.retryOn,
+      when: step.when,
+      ignore_failure: step.ignore_failure,
     };
   }
 
@@ -157,6 +213,89 @@ export class FlowRunner {
     }));
   }
 
+  /**
+   * Merge an enclosing flow step's per-task override map onto inherited parent
+   * options. Inner (closer) overrides win over outer for the same task+key.
+   */
+  private mergeParentOptions(
+    base: ParentOptions,
+    overrideMap: Record<string, unknown> | undefined,
+  ): ParentOptions {
+    if (!overrideMap) return base;
+    const out: ParentOptions = { ...base };
+    for (const [name, opts] of Object.entries(overrideMap)) {
+      if (opts && typeof opts === 'object' && !Array.isArray(opts)) {
+        out[name] = { ...(base[name] ?? {}), ...(opts as Record<string, unknown>) };
+      }
+    }
+    return out;
+  }
+
+  /** Recursively expand a plan step's nested flow into its child steps. */
+  private expandPlanStep(
+    planStep: PlanStep,
+    parentOptions: ParentOptions,
+    pathPrefix: string,
+    depth: number,
+    ancestors: Set<string>,
+    skipSet: Set<string>,
+  ): PlanStep[] {
+    const self: PlanStep = { ...planStep, path: pathPrefix, depth };
+    if (planStep.type !== 'flow' || planStep.skipped || ancestors.has(planStep.name)) {
+      return [self];
+    }
+    const childFlow = this.flows[planStep.name];
+    if (!childFlow) return [self];
+
+    const childParentOptions = this.mergeParentOptions(parentOptions, planStep.options);
+    const nextAncestors = new Set(ancestors).add(planStep.name);
+    const childPlan = this.resolveExecutionPlan(childFlow, skipSet);
+    const children = childPlan.flatMap((cs) =>
+      this.expandPlanStep(
+        cs,
+        childParentOptions,
+        `${pathPrefix}/${cs.stepNumber}`,
+        depth + 1,
+        nextAncestors,
+        skipSet,
+      ),
+    );
+    return [self, ...children];
+  }
+
+  /** Evaluate a step's `when:` to a boolean. Undefined `when` always runs. */
+  private async evaluateWhen(
+    when: string | boolean | undefined,
+    completedSteps: FlowStepResult[],
+    params: Record<string, unknown> | undefined,
+    errorCtx?: { error: Error; step?: string },
+  ): Promise<boolean> {
+    if (when === undefined) return true;
+    if (typeof when === 'boolean') return when;
+
+    const error = errorCtx
+      ? {
+          message: errorCtx.error.message,
+          name: errorCtx.error.name,
+          stack: errorCtx.error.stack,
+          step: errorCtx.step,
+        }
+      : undefined;
+
+    if (this.conditionEvaluator) {
+      return await this.conditionEvaluator(when, {
+        steps: completedSteps,
+        params,
+        context: this.ctx,
+        error,
+      });
+    }
+
+    // Built-in fallback: resolve ${...} references, then test truthiness.
+    const resolved = resolveReferences(when as unknown, { steps: completedSteps, error });
+    return truthy(resolved);
+  }
+
   // ---------------------------------------------------------------------------
   // Internal
   // ---------------------------------------------------------------------------
@@ -164,6 +303,7 @@ export class FlowRunner {
   private async executeFlow(
     options: FlowRunOptions,
     isTopLevel: boolean,
+    parentOptions: ParentOptions,
   ): Promise<FlowRunResult> {
     const startTime = Date.now();
     const skipSet = new Set(options.skip ?? []);
@@ -182,9 +322,21 @@ export class FlowRunner {
 
     // Plan mode — dump all phases for visibility, nothing runs.
     if (options.plan) {
+      const mainPlan = options.expandNestedFlows
+        ? executionPlan.flatMap((s) =>
+            this.expandPlanStep(
+              s,
+              parentOptions,
+              String(s.stepNumber),
+              0,
+              new Set([options.flowName]),
+              skipSet,
+            ),
+          )
+        : executionPlan;
       const fullPlan: PlanStep[] = [
         ...this.planHookSteps(flow.on_start, 'on_start', skipSet, -3000),
-        ...executionPlan,
+        ...mainPlan,
         ...this.planHookSteps(flow.on_success, 'on_success', skipSet, 10_000),
         ...this.planHookSteps(flow.on_failure, 'on_failure', skipSet, 20_000),
         ...this.planHookSteps(flow.finally, 'finally', skipSet, 30_000),
@@ -197,7 +349,8 @@ export class FlowRunner {
           name: s.name,
           skipped: s.skipped,
           duration: 0,
-        })),
+          ...(s.path !== undefined ? { path: s.path, depth: s.depth } : {}),
+        })) as unknown as FlowStepResult[],
         duration: 0,
       };
     }
@@ -217,6 +370,7 @@ export class FlowRunner {
           hookStep,
           options,
           completedSteps,
+          parentOptions,
           undefined,
           hookErrors,
         );
@@ -231,13 +385,47 @@ export class FlowRunner {
     // ---- main steps ----
     if (!flowError) {
       for (const planStep of executionPlan) {
-        if (planStep.skipped) {
+        // Resolve conditional execution (`when:`) at run time.
+        let conditionMet = true;
+        let conditionError: Error | undefined;
+        if (!planStep.skipped && planStep.when !== undefined) {
+          try {
+            conditionMet = await this.evaluateWhen(planStep.when, completedSteps, options.params);
+          } catch (err) {
+            conditionError = err instanceof Error ? err : new Error(String(err));
+          }
+        }
+
+        if (conditionError) {
+          // A condition that throws is treated like a step failure.
+          const sr: FlowStepResult = {
+            stepNumber: planStep.stepNumber,
+            type: planStep.type,
+            name: planStep.name,
+            skipped: false,
+            duration: 0,
+            result: { success: false, error: conditionError },
+          };
+          completedSteps.push(sr);
+          await this.hooks.afterStep?.(planStep, sr);
+          if (planStep.ignore_failure) {
+            sr.ignoredFailure = true;
+            continue;
+          }
+          flowError = conditionError;
+          flowErrorStepName = planStep.name;
+          await this.hooks.onStepError?.(planStep, conditionError, completedSteps);
+          break;
+        }
+
+        if (planStep.skipped || !conditionMet) {
           const sr: FlowStepResult = {
             stepNumber: planStep.stepNumber,
             type: planStep.type,
             name: planStep.name,
             skipped: true,
             duration: 0,
+            skipReason: planStep.skipped ? 'static' : 'when',
           };
           completedSteps.push(sr);
           await this.hooks.afterStep?.(planStep, sr);
@@ -255,6 +443,7 @@ export class FlowRunner {
               planStep,
               options.params,
               completedSteps,
+              parentOptions,
             );
             stepResult = {
               stepNumber: planStep.stepNumber,
@@ -272,11 +461,11 @@ export class FlowRunner {
               });
             }
           } else {
-            const nestedResult = await this.run({
-              ...options,
-              flowName: planStep.name,
-              plan: false,
-            });
+            const childParentOptions = this.mergeParentOptions(parentOptions, planStep.options);
+            const nestedResult = await this.runWith(
+              { ...options, flowName: planStep.name, plan: false },
+              childParentOptions,
+            );
             stepResult = {
               stepNumber: planStep.stepNumber,
               type: 'flow',
@@ -284,6 +473,7 @@ export class FlowRunner {
               result: {
                 success: nestedResult.success,
                 data: { stepCount: nestedResult.steps.length },
+                error: nestedResult.success ? undefined : nestedResult.error,
               },
               skipped: false,
               duration: Date.now() - stepStart,
@@ -297,32 +487,46 @@ export class FlowRunner {
                 });
               }
             }
-            if (!nestedResult.success) {
-              flowError = nestedResult.error ?? new Error(`Nested flow ${planStep.name} failed`);
-              flowErrorStepName = planStep.name;
-            }
           }
 
           completedSteps.push(stepResult);
           await this.hooks.afterStep?.(planStep, stepResult);
 
           if (!stepResult.result?.success) {
+            if (planStep.ignore_failure) {
+              stepResult.ignoredFailure = true;
+              this.logger.info(
+                { step: planStep.stepNumber, task: planStep.name },
+                `Step ${planStep.name} failed but ignore_failure is set; continuing`,
+              );
+              continue;
+            }
             flowError =
-              flowError ?? stepResult.result?.error ?? new Error(`Step ${planStep.name} failed`);
-            flowErrorStepName = flowErrorStepName ?? planStep.name;
+              stepResult.result?.error ?? new Error(`Step ${planStep.name} failed`);
+            flowErrorStepName = planStep.name;
             await this.hooks.onStepError?.(planStep, flowError, completedSteps);
             break;
           }
         } catch (error) {
           const err = error instanceof Error ? error : new Error(String(error));
-          completedSteps.push({
+          const sr: FlowStepResult = {
             stepNumber: planStep.stepNumber,
             type: planStep.type,
             name: planStep.name,
             skipped: false,
             duration: Date.now() - stepStart,
             result: { success: false, error: err },
-          });
+          };
+          completedSteps.push(sr);
+          if (planStep.ignore_failure) {
+            sr.ignoredFailure = true;
+            await this.hooks.afterStep?.(planStep, sr);
+            this.logger.info(
+              { step: planStep.stepNumber, task: planStep.name },
+              `Step ${planStep.name} threw but ignore_failure is set; continuing`,
+            );
+            continue;
+          }
           flowError = err;
           flowErrorStepName = planStep.name;
           await this.hooks.onStepError?.(planStep, err, completedSteps);
@@ -339,6 +543,7 @@ export class FlowRunner {
           hookStep,
           options,
           completedSteps,
+          parentOptions,
           { error: flowError, step: flowErrorStepName },
           hookErrors,
         );
@@ -346,7 +551,7 @@ export class FlowRunner {
     } else {
       const successPlan = this.planHookSteps(flow.on_success, 'on_success', skipSet, 10_000);
       for (const hookStep of successPlan) {
-        await this.runHookStep(hookStep, options, completedSteps, undefined, hookErrors);
+        await this.runHookStep(hookStep, options, completedSteps, parentOptions, undefined, hookErrors);
       }
     }
 
@@ -364,6 +569,7 @@ export class FlowRunner {
           hookStep,
           options,
           completedSteps,
+          parentOptions,
           flowError ? { error: flowError, step: flowErrorStepName } : undefined,
           hookErrors,
         );
@@ -390,17 +596,34 @@ export class FlowRunner {
     hookStep: PlanStep,
     options: FlowRunOptions,
     completedSteps: FlowStepResult[],
+    parentOptions: ParentOptions,
     errorCtx: { error: Error; step?: string } | undefined,
     hookErrors: HookError[],
   ): Promise<boolean> {
     if (hookStep.skipped) return true;
+
+    // Hook steps honor `when:` too — a falsy condition skips them silently.
+    if (hookStep.when !== undefined) {
+      try {
+        const ok = await this.evaluateWhen(hookStep.when, completedSteps, options.params, errorCtx);
+        if (!ok) return true;
+      } catch (err) {
+        hookErrors.push({
+          phase: hookStep.phase!,
+          name: hookStep.name,
+          error: err instanceof Error ? err : new Error(String(err)),
+        });
+        return false;
+      }
+    }
+
     try {
       if (hookStep.type === 'flow') {
-        const nested = await this.run({
-          ...options,
-          flowName: hookStep.name,
-          plan: false,
-        });
+        const childParentOptions = this.mergeParentOptions(parentOptions, hookStep.options);
+        const nested = await this.runWith(
+          { ...options, flowName: hookStep.name, plan: false },
+          childParentOptions,
+        );
         if (!nested.success) {
           hookErrors.push({
             phase: hookStep.phase!,
@@ -416,6 +639,7 @@ export class FlowRunner {
         hookStep,
         options.params,
         completedSteps,
+        parentOptions,
         errorCtx,
       );
       if (!result.success) {
@@ -441,6 +665,7 @@ export class FlowRunner {
     step: PlanStep,
     flowParams: Record<string, unknown> | undefined,
     completedSteps: FlowStepResult[],
+    parentOptions: ParentOptions,
     errorCtx?: { error: Error; step?: string },
   ): Promise<{ result: TaskResult; attempts: number }> {
     const maxAttempts = Math.max(1, 1 + (step.retries ?? 0));
@@ -450,7 +675,13 @@ export class FlowRunner {
     let lastResult: TaskResult = { success: false, error: new Error('no attempts executed') };
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      lastResult = await this.executeTaskStep(step, flowParams, completedSteps, errorCtx);
+      lastResult = await this.executeTaskStep(
+        step,
+        flowParams,
+        completedSteps,
+        parentOptions,
+        errorCtx,
+      );
       if (lastResult.success) return { result: lastResult, attempts: attempt };
 
       const errMsg = lastResult.error?.message ?? '';
@@ -474,10 +705,17 @@ export class FlowRunner {
     step: PlanStep,
     flowParams: Record<string, unknown> | undefined,
     completedSteps: FlowStepResult[],
+    parentOptions: ParentOptions,
     errorCtx?: { error: Error; step?: string },
   ): Promise<TaskResult> {
     const taskDef = this.resolveTaskDefinition(step.name);
-    const rawOptions = { ...taskDef.options, ...step.options, ...flowParams };
+    // Precedence (low → high): task default → enclosing-flow override → step inline → runtime params.
+    const rawOptions = {
+      ...taskDef.options,
+      ...(parentOptions[step.name] ?? {}),
+      ...step.options,
+      ...flowParams,
+    };
 
     const refCtx: ReferenceContext = {
       steps: completedSteps,
@@ -554,6 +792,15 @@ export class FlowRunner {
     }
     return { class_path: taskName, options: {} };
   }
+}
+
+/** Truthiness of a resolved `when:` value, with string special-cases. */
+function truthy(value: unknown): boolean {
+  if (typeof value === 'boolean') return value;
+  if (value == null) return false;
+  if (typeof value === 'number') return value !== 0;
+  const s = String(value).trim().toLowerCase();
+  return !(s === '' || s === 'false' || s === '0' || s === 'null' || s === 'undefined');
 }
 
 function sleep(ms: number): Promise<void> {

@@ -23,6 +23,15 @@ export const FlowStepSchema = z
     retryDelay: z.number().int().nonnegative().optional(),
     /** Only retry when the error message contains this substring. */
     retryOn: z.string().optional(),
+    /**
+     * Conditional execution. A boolean runs/skips the step directly; a string is
+     * an expression evaluated at runtime by the runner's `conditionEvaluator`
+     * (or the built-in `${...}`-reference truthiness check if none is set). A
+     * falsy result skips the step without failing the flow.
+     */
+    when: z.union([z.string(), z.boolean()]).optional(),
+    /** If true, a failure of this step is recorded but does not abort the flow. */
+    ignore_failure: z.boolean().optional(),
   })
   .refine(
     (data) => {
