@@ -71,6 +71,41 @@ function makeRunner(
 // Tests
 // ---------------------------------------------------------------------------
 
+describe('FlowRunner.runTask', () => {
+  it('runs a single task directly, merging caller options over the task defaults', async () => {
+    const log: string[] = [];
+    const runner = makeRunner(
+      { rec: { class_path: 'test.Record', options: { label: 'default' } } },
+      {},
+      { __log: log },
+    );
+    const result = await runner.runTask('rec', { label: 'override' });
+    expect(result.success).toBe(true);
+    expect(result.data).toEqual({ label: 'override' });
+    expect(log).toEqual(['override']); // ran exactly once, no flow wrapper
+  });
+
+  it('uses the task defaults when no options are passed', async () => {
+    const log: string[] = [];
+    const runner = makeRunner({ rec: { class_path: 'test.Record', options: { label: 'default' } } }, {}, { __log: log });
+    await runner.runTask('rec');
+    expect(log).toEqual(['default']);
+  });
+
+  it('falls back to the name as the class path for an unconfigured task', async () => {
+    const runner = makeRunner({}, {});
+    const result = await runner.runTask('test.Pass');
+    expect(result.success).toBe(true);
+  });
+
+  it('surfaces a task failure as a failed result', async () => {
+    const runner = makeRunner({ boom: { class_path: 'test.Fail', options: {} } }, {});
+    const result = await runner.runTask('boom');
+    expect(result.success).toBe(false);
+    expect(result.error?.message).toBe('intentional');
+  });
+});
+
 describe('FlowRunner', () => {
   it('runs a single-step flow', async () => {
     const runner = makeRunner(

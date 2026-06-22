@@ -159,6 +159,24 @@ export class FlowRunner {
     return this.runWith(options, {});
   }
 
+  /**
+   * Run a single task by name, directly — the leaf unit of work, without a flow.
+   * A flow is a composition of these; this is the same primitive each flow step
+   * executes (see `executeTask`), so a task behaves identically whether it's run
+   * on its own or as a step. `options` merge over the task's configured defaults.
+   */
+  async runTask(taskName: string, options: Record<string, unknown> = {}): Promise<TaskResult> {
+    const taskDef = this.resolveTaskDefinition(taskName);
+    this.logger.info({ task: taskName }, `Running task ${taskName}`);
+    return this.executeTask(taskDef.class_path, { ...taskDef.options, ...options });
+  }
+
+  /** Instantiate and run a task with fully-resolved options (the shared leaf). */
+  private async executeTask(classPath: string, options: Record<string, unknown>): Promise<TaskResult> {
+    const task = await this.registry.create(classPath, this.ctx, options);
+    return task.run();
+  }
+
   private async runWith(
     options: FlowRunOptions,
     parentOptions: ParentOptions,
@@ -744,8 +762,7 @@ export class FlowRunner {
       `Executing step ${step.stepNumber}: ${step.name}`,
     );
 
-    const task = await this.registry.create(taskDef.class_path, this.ctx, mergedOptions);
-    return task.run();
+    return this.executeTask(taskDef.class_path, mergedOptions);
   }
 
   private async performRollback(
@@ -758,11 +775,7 @@ export class FlowRunner {
       result.attempted++;
       try {
         const taskDef = this.resolveTaskDefinition(rec.taskName);
-        const task = await this.registry.create(taskDef.class_path, this.ctx, {
-          ...taskDef.options,
-          ...rec.payload,
-        });
-        const r = await task.run();
+        const r = await this.executeTask(taskDef.class_path, { ...taskDef.options, ...rec.payload });
         if (r.success) {
           result.succeeded++;
         } else {
