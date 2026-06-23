@@ -3,7 +3,13 @@ import { z } from 'zod';
 export const TaskOptionsSchema = z.record(z.unknown());
 
 export const TaskDefinitionSchema = z.object({
-  class_path: z.string().min(1),
+  /**
+   * The task's implementation. Optional: an option-only entry (no class_path)
+   * is a valid override that layers `options` onto a same-named base definition
+   * (e.g. a universal task or a config merged on top). When no base supplies a
+   * class_path, the runner falls back to the task name.
+   */
+  class_path: z.string().min(1).optional(),
   description: z.string().optional(),
   group: z.string().optional(),
   options: TaskOptionsSchema.optional().default({}),

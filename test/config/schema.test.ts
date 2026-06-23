@@ -21,11 +21,13 @@ describe('TaskDefinitionSchema', () => {
     expect(result.options).toEqual({ dry_run: true });
   });
 
-  it('rejects missing class_path', () => {
-    expect(() => TaskDefinitionSchema.parse({})).toThrow();
+  it('accepts an option-only entry (no class_path) — a valid override that layers onto a base', () => {
+    const result = TaskDefinitionSchema.parse({ options: { suites: 'robot/Tests' } });
+    expect(result.class_path).toBeUndefined();
+    expect(result.options).toEqual({ suites: 'robot/Tests' });
   });
 
-  it('rejects empty class_path', () => {
+  it('rejects an empty-string class_path', () => {
     expect(() => TaskDefinitionSchema.parse({ class_path: '' })).toThrow();
   });
 });

@@ -98,6 +98,20 @@ describe('FlowRunner.runTask', () => {
     expect(result.success).toBe(true);
   });
 
+  it('runs an option-only task definition (no class_path) by resolving via its name', async () => {
+    const log: string[] = [];
+    const registry = new TaskRegistry().registerClassPath('record', RecordTask as unknown as TaskConstructor);
+    const runner = new FlowRunner({
+      tasks: { record: { options: { label: 'opt-only' } } }, // option-only: no class_path
+      flows: {},
+      registry,
+      context: { __log: log },
+    });
+    const result = await runner.runTask('record');
+    expect(result.success).toBe(true);
+    expect(log).toEqual(['opt-only']);
+  });
+
   it('surfaces a task failure as a failed result', async () => {
     const runner = makeRunner({ boom: { class_path: 'test.Fail', options: {} } }, {});
     const result = await runner.runTask('boom');

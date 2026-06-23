@@ -818,7 +818,9 @@ export class FlowRunner {
   } {
     const taskDef = this.tasks[taskName];
     if (taskDef) {
-      return { class_path: taskDef.class_path, options: taskDef.options ?? {} };
+      // An option-only entry (no class_path) layers options onto a base of the
+      // same name; absent a base class_path, resolve by the task name itself.
+      return { class_path: taskDef.class_path ?? taskName, options: taskDef.options ?? {} };
     }
     return { class_path: taskName, options: {} };
   }
