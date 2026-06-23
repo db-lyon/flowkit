@@ -14,6 +14,35 @@ const ctx = (steps: ReferenceableStep[], error?: Parameters<typeof resolveRefere
   error,
 });
 
+describe('resolveReferences — host namespaces', () => {
+  const ns = { project: { package: { namespace: 'acme' } }, org: { username: 'a@b.com' }, env: { HOME: '/h' } };
+
+  it('whole-value reference yields the raw typed value', () => {
+    expect(resolveReferences('${project.package.namespace}', { steps: [], namespaces: ns })).toBe('acme');
+    expect(resolveReferences('${project.package}', { steps: [], namespaces: ns })).toEqual({ namespace: 'acme' });
+  });
+
+  it('interpolates a namespace value into a larger string', () => {
+    expect(resolveReferences('deploys/${org.username}/pkg', { steps: [], namespaces: ns })).toBe('deploys/a@b.com/pkg');
+    expect(resolveReferences('${env.HOME}/x/${project.package.namespace}', { steps: [], namespaces: ns })).toBe('/h/x/acme');
+  });
+
+  it('leaves an UNREGISTERED namespace untouched (not a reference we own)', () => {
+    expect(resolveReferences('${unknown.thing}', { steps: [], namespaces: ns })).toBe('${unknown.thing}');
+    expect(resolveReferences('a ${nope.x} b', { steps: [], namespaces: ns })).toBe('a ${nope.x} b');
+  });
+
+  it('a missing path inside a registered namespace resolves to empty/undefined', () => {
+    expect(resolveReferences('x${org.missing}y', { steps: [], namespaces: ns })).toBe('xy');
+    expect(resolveReferences('${org.missing}', { steps: [], namespaces: ns })).toBeUndefined();
+  });
+
+  it('resolves steps alongside host namespaces', () => {
+    const s = [step(1, 'build', { id: '04t' })];
+    expect(resolveReferences('${steps.build.id}@${project.package.namespace}', { steps: s, namespaces: ns })).toBe('04t@acme');
+  });
+});
+
 describe('resolveReferences — steps namespace', () => {
   it('returns primitives unchanged', () => {
     expect(resolveReferences(42, ctx([]))).toBe(42);

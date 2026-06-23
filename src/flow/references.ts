@@ -1,17 +1,20 @@
 /**
  * Reference resolution for flow option values.
  *
- * Option values may contain two reference namespaces, delimited by `${...}`:
+ * Option values may contain `${<namespace>.<path>}` references:
  *
  *   ${steps.<id>.<path>}  → value from a previously completed step
  *   ${error.<path>}       → error info, only inside on_failure / finally hooks
+ *   ${<ns>.<path>}        → value from a host-supplied namespace in `namespaces`
+ *                           (e.g. ${project.package.namespace}, ${org.username},
+ *                           ${env.HOME}) — the resolver is namespace-extensible,
+ *                           symmetric with the pluggable `conditionEvaluator`.
  *
- * `<id>` is a step number ("3") or a task name ("level.place_actor"). Task
- * names match the most recently completed step with that name. Longest-prefix
- * match wins when a task name shares a prefix with a path segment.
- *
- * A reference that fills the entire string is replaced with the raw value
- * (preserving object/array/number types). Embedded references are stringified.
+ * For `steps`, `<id>` is a step number ("3") or a task name ("level.place_actor");
+ * task names match the most recently completed step with that name, longest-prefix
+ * wins. A reference filling the entire string yields the raw value (preserving
+ * object/array/number types); embedded references are stringified. A reference to
+ * an UNREGISTERED namespace is left untouched (so non-reference `${...}` survives).
  */
 
 export interface ReferenceableStep {
@@ -24,10 +27,15 @@ export interface ReferenceContext {
   steps: ReferenceableStep[];
   /** Present inside on_failure / finally hooks. */
   error?: { message: string; name: string; stack?: string; step?: string };
+  /** Host-supplied reference namespaces, e.g. { project, org, env }. */
+  namespaces?: Record<string, unknown>;
 }
 
-const WHOLE_VALUE = /^\$\{(steps|error)\.([^}]+)\}$/;
-const EMBEDDED = /\$\{(steps|error)\.([^}]+)\}/g;
+/** Returned by resolveRef when the namespace is unregistered — leave the text literal. */
+const LITERAL = Symbol('literal');
+
+const WHOLE_VALUE = /^\$\{(\w+)\.([^}]+)\}$/;
+const EMBEDDED = /\$\{(\w+)\.([^}]+)\}/g;
 
 export function resolveReferences<T>(value: T, ctx: ReferenceContext): T {
   if (value == null) return value;
@@ -47,12 +55,16 @@ export function resolveReferences<T>(value: T, ctx: ReferenceContext): T {
 
 function resolveString(str: string, ctx: ReferenceContext): unknown {
   const whole = str.match(WHOLE_VALUE);
-  if (whole) return resolveRef(whole[1]!, whole[2]!, ctx);
+  if (whole) {
+    const v = resolveRef(whole[1]!, whole[2]!, ctx);
+    return v === LITERAL ? str : v;
+  }
 
   if (!str.includes('${')) return str;
 
-  return str.replace(EMBEDDED, (_match, ns: string, ref: string) => {
+  return str.replace(EMBEDDED, (match, ns: string, ref: string) => {
     const v = resolveRef(ns, ref, ctx);
+    if (v === LITERAL) return match; // unregistered namespace — leave untouched
     if (v == null) return '';
     if (typeof v === 'object') return JSON.stringify(v);
     return String(v);
@@ -69,19 +81,25 @@ function resolveRef(namespace: string, ref: string, ctx: ReferenceContext): unkn
     return getPath(ctx.error, ref.split('.'));
   }
 
-  // steps namespace
-  const segments = ref.split('.');
-  for (let i = segments.length; i >= 1; i--) {
-    const idCandidate = segments.slice(0, i).join('.');
-    const match = findStep(idCandidate, ctx.steps);
-    if (match) {
-      return getPath(match.result?.data, segments.slice(i));
+  if (namespace === 'steps') {
+    const segments = ref.split('.');
+    for (let i = segments.length; i >= 1; i--) {
+      const idCandidate = segments.slice(0, i).join('.');
+      const match = findStep(idCandidate, ctx.steps);
+      if (match) return getPath(match.result?.data, segments.slice(i));
     }
+    throw new Error(
+      `Unresolvable step reference: \${steps.${ref}} — no completed step matches "${segments[0]}"`,
+    );
   }
 
-  throw new Error(
-    `Unresolvable step reference: \${steps.${ref}} — no completed step matches "${segments[0]}"`,
-  );
+  // Host-supplied namespace (project / org / env / ...). Missing path → undefined.
+  if (ctx.namespaces && namespace in ctx.namespaces) {
+    return getPath(ctx.namespaces[namespace], ref.split('.'));
+  }
+
+  // Unregistered namespace — not a reference we own; leave it literal.
+  return LITERAL;
 }
 
 function findStep(id: string, steps: ReferenceableStep[]): ReferenceableStep | undefined {

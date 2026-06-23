@@ -129,6 +129,11 @@ export interface FlowRunnerConfig {
   logger?: Logger;
   /** Optional evaluator for string `when:` expressions. */
   conditionEvaluator?: ConditionEvaluator;
+  /**
+   * Host-supplied reference namespaces for `${ns.path}` interpolation in option
+   * values, e.g. `{ project, org, env }`. `steps` and `error` are always built in.
+   */
+  references?: Record<string, unknown>;
 }
 
 // ---------------------------------------------------------------------------
@@ -143,6 +148,7 @@ export class FlowRunner {
   private ctx: TaskContext;
   private hooks: FlowRunnerHooks;
   private conditionEvaluator?: ConditionEvaluator;
+  private references?: Record<string, unknown>;
   private runDepth = 0;
 
   constructor(config: FlowRunnerConfig) {
@@ -152,6 +158,7 @@ export class FlowRunner {
     this.registry = config.registry;
     this.hooks = config.hooks ?? {};
     this.conditionEvaluator = config.conditionEvaluator;
+    this.references = config.references;
     this.ctx = { ...config.context, registry: config.registry };
   }
 
@@ -168,7 +175,12 @@ export class FlowRunner {
   async runTask(taskName: string, options: Record<string, unknown> = {}): Promise<TaskResult> {
     const taskDef = this.resolveTaskDefinition(taskName);
     this.logger.info({ task: taskName }, `Running task ${taskName}`);
-    return this.executeTask(taskDef.class_path, { ...taskDef.options, ...options });
+    // Interpolate ${ns.path} references in option values (no prior steps here).
+    const merged = resolveReferences({ ...taskDef.options, ...options }, {
+      steps: [],
+      namespaces: this.references,
+    });
+    return this.executeTask(taskDef.class_path, merged);
   }
 
   /** Instantiate and run a task with fully-resolved options (the shared leaf). */
@@ -310,7 +322,11 @@ export class FlowRunner {
     }
 
     // Built-in fallback: resolve ${...} references, then test truthiness.
-    const resolved = resolveReferences(when as unknown, { steps: completedSteps, error });
+    const resolved = resolveReferences(when as unknown, {
+      steps: completedSteps,
+      namespaces: this.references,
+      error,
+    });
     return truthy(resolved);
   }
 
@@ -737,6 +753,7 @@ export class FlowRunner {
 
     const refCtx: ReferenceContext = {
       steps: completedSteps,
+      namespaces: this.references,
       error: errorCtx
         ? {
             message: errorCtx.error.message,
