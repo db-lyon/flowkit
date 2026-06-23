@@ -95,6 +95,18 @@ describe('FlowDefinitionSchema', () => {
     });
     expect(result.steps['1']).toBeDefined();
   });
+
+  it('accepts an override flow with no description and no steps', () => {
+    const result = FlowDefinitionSchema.parse({ steps: { 1: { task: 'a' } } });
+    expect(result.description).toBeUndefined();
+    const bare = FlowDefinitionSchema.parse({});
+    expect(bare.steps).toEqual({});
+  });
+
+  it('tolerates a null description (override that clears it)', () => {
+    const result = FlowDefinitionSchema.parse({ description: null, steps: { 1: { flow: 'x' } } });
+    expect(result.description).toBeNull();
+  });
 });
 
 describe('EngineConfigSchema', () => {

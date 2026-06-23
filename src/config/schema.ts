@@ -48,8 +48,13 @@ export const FlowStepSchema = z
   );
 
 export const FlowDefinitionSchema = z.object({
-  description: z.string(),
-  steps: z.record(z.coerce.string(), FlowStepSchema),
+  /**
+   * Optional: a flow override (one that layers steps/hooks onto a same-named
+   * base) need not restate the description. Tolerates an explicit null.
+   */
+  description: z.string().nullish(),
+  /** Optional/defaulted so an override that only adjusts hooks/options is valid. */
+  steps: z.record(z.coerce.string(), FlowStepSchema).default({}),
   /** Runs before the first step. Failure fails the flow before steps execute. */
   on_start: z.array(FlowStepSchema).optional(),
   /** Runs after all steps succeed. */
