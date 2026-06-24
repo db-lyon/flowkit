@@ -8,7 +8,8 @@ jobs:
   publish:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      # write: the post-publish step pushes a git tag and cuts a GitHub Release.
+      contents: write
       # OIDC trusted publisher: npm CLI exchanges this for a short-lived
       # publish token at npmjs.org. The trusted publisher binding is
       # configured on the npm side (workflow filename + repo + branch).
@@ -48,3 +49,16 @@ jobs:
 
       - run: npm publish --access=public --provenance
         if: steps.version.outputs.changed == 'true'
+
+      # On a real version bump, tag the published commit and cut a GitHub
+      # Release with auto-generated notes. Keeps tags/Releases in lockstep
+      # with npm without a separate tag-push trigger.
+      - name: Tag and create GitHub Release
+        if: steps.version.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          V="v${{ steps.version.outputs.local }}"
+          git tag -a "$V" -m "$V"
+          git push origin "$V"
+          gh release create "$V" --title "$V" --generate-notes
