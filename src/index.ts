@@ -43,6 +43,14 @@ export {
 export type { LLMRunOptions, LLMRunResult, AgentRunFields } from './task/llm-runner.js';
 export { validateJson, formatErrors } from './task/json-schema.js';
 export type { ValidationError, ValidationResult } from './task/json-schema.js';
+export { mapLimit } from './task/concurrency.js';
+export {
+  createLedger,
+  chargeLedger,
+  ledgerExhausted,
+  exhaustedLimit,
+} from './task/token-ledger.js';
+export type { TokenLedger } from './task/token-ledger.js';
 export { redact, truncate, preview } from './task/redact.js';
 export type {
   LLMProvider,

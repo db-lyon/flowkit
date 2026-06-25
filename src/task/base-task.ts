@@ -3,6 +3,7 @@ import { noopLogger } from '../logger.js';
 import type { TaskRegistry } from './registry.js';
 import type { LLMProvider, LLMToolHandler } from './llm-provider.js';
 import type { TaskDefinition } from '../config/schema.js';
+import type { TokenLedger } from './token-ledger.js';
 
 export interface TaskContext {
   logger?: Logger;
@@ -31,9 +32,15 @@ export interface TaskContext {
     agentName: string,
     input: Record<string, unknown>,
     depth: number,
+    ledger?: TokenLedger,
   ) => Promise<TaskResult>;
   /** Current agent-recursion depth, threaded by `FlowRunner.runAgent`. */
   __agentDepth?: number;
+  /**
+   * Shared token ledger for the current agent subtree, threaded by
+   * `FlowRunner.runAgent` so a parent's `tokenBudget` bounds its sub-agents too.
+   */
+  __tokenLedger?: TokenLedger;
   [key: string]: unknown;
 }
 

@@ -189,12 +189,17 @@ coordinating agent.
 - **Argument validation** — the model's arguments are checked against each
   tool's `parameters` schema before the tool runs; invalid arguments are fed
   back for the model to correct.
-- **Bounded results** — each tool result is truncated to
-  `maxToolResultChars` (default 8000).
+- **Bounded results** — each tool result is truncated to `maxToolResultChars`
+  (default 8000). Sub-agent (`agent:`) results use a separate
+  `maxAgentResultChars` (default unbounded) so code, diffs, and stack traces are
+  not clipped mid-payload like opaque tool output.
 - **Bounded loops** — `maxIterations` (default 8) caps model turns; exceeding it
   fails the step.
-- **Bounded spend** — `tokenBudget` caps total input+output tokens across the
-  whole loop (and its sub-agents); reaching it fails the step.
+- **Bounded spend** — `tokenBudget` is a true aggregate ceiling: a budgeted
+  agent and its entire sub-agent tree charge one shared ledger, so fan-out
+  cannot multiply spend past the cap. Reaching it fails the step. Any agent
+  whose toolset includes an `agent:` tool **must** set a `tokenBudget` (or run
+  under an ancestor that did) — the engine rejects an unbounded fan-out.
 - **Bounded recursion** — `maxAgentDepth` (default 6) caps how deep
   agents-calling-agents may nest.
 

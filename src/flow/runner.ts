@@ -5,6 +5,7 @@ import type { TaskResult, RollbackRecord } from '../task/base-task.js';
 import type { TaskContext } from '../task/base-task.js';
 import type { TaskRegistry, TaskConstructor } from '../task/registry.js';
 import { AgentTask, type AgentTaskOptions } from '../task/agent-task.js';
+import type { TokenLedger } from '../task/token-ledger.js';
 import { resolveReferences, type ReferenceContext } from './references.js';
 
 // ---------------------------------------------------------------------------
@@ -192,7 +193,8 @@ export class FlowRunner {
     // flow/agent tool dispatchers.
     this.ctx = { ...config.context, registry: config.registry, taskDefinitions: this.tasks };
     this.ctx.runFlow = (flowName, params) => this.runFlowTool(flowName, params);
-    this.ctx.runAgent = (agentName, input, depth) => this.runAgentTool(agentName, input, depth);
+    this.ctx.runAgent = (agentName, input, depth, ledger) =>
+      this.runAgentTool(agentName, input, depth, ledger);
   }
 
   /** Map an agent definition onto AgentTask options (everything but the prompt). */
@@ -208,6 +210,7 @@ export class FlowRunner {
       maxIterations: b.maxIterations,
       tokenBudget: b.tokenBudget,
       maxToolResultChars: b.maxToolResultChars,
+      maxAgentResultChars: b.maxAgentResultChars,
       maxConcurrency: b.maxConcurrency,
       maxAgentDepth: b.maxAgentDepth,
       timeout: def.timeout,
@@ -233,17 +236,22 @@ export class FlowRunner {
     return { success: res.success, error: res.error, data: { success: res.success, steps } };
   }
 
-  /** Run a configured agent as an agent tool (sub-agent), threading recursion depth. */
+  /**
+   * Run a configured agent as an agent tool (sub-agent), threading recursion
+   * depth and the caller's token ledger so the sub-agent's spend charges the
+   * same budget.
+   */
   private async runAgentTool(
     agentName: string,
     input: Record<string, unknown>,
     depth: number,
+    ledger?: TokenLedger,
   ): Promise<TaskResult> {
     const def = this.agents[agentName];
     if (!def) return { success: false, error: new Error(`unknown agent "${agentName}"`) };
     const prompt = typeof input.prompt === 'string' ? input.prompt : JSON.stringify(input);
     const options = { ...this.compileAgent(def), prompt };
-    const childCtx: TaskContext = { ...this.ctx, __agentDepth: depth };
+    const childCtx: TaskContext = { ...this.ctx, __agentDepth: depth, __tokenLedger: ledger };
     return new AgentTask(childCtx, options as AgentTaskOptions).run();
   }
 

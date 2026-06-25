@@ -102,6 +102,8 @@ export const AgentBudgetSchema = z.object({
   tokenBudget: z.number().int().positive().optional(),
   /** Cap on a single tool result's serialized size, in chars. */
   maxToolResultChars: z.number().int().positive().optional(),
+  /** Cap on a sub-agent result's serialized size, in chars (0 = unbounded). */
+  maxAgentResultChars: z.number().int().nonnegative().optional(),
   /** Max tool calls run concurrently within a turn. */
   maxConcurrency: z.number().int().positive().optional(),
   /** Max depth of agent-calls-agent recursion. */
