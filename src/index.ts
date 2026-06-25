@@ -5,6 +5,9 @@ export {
   TaskDefinitionSchema,
   FlowStepSchema,
   FlowDefinitionSchema,
+  AgentToolSchema,
+  AgentBudgetSchema,
+  AgentDefinitionSchema,
   EngineConfigSchema,
 } from './config/schema.js';
 export type {
@@ -12,6 +15,9 @@ export type {
   TaskDefinition,
   FlowStep,
   FlowDefinition,
+  AgentTool,
+  AgentBudget,
+  AgentDefinition,
   EngineConfig,
 } from './config/schema.js';
 export { loadConfig, loadRawYaml, findConfigFile } from './config/loader.js';

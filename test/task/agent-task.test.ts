@@ -172,6 +172,71 @@ describe('AgentTask', () => {
     expect(result.data?.parsed).toEqual({ answer: 5 });
   });
 
+  it('invokes a flow tool via ctx.runFlow', async () => {
+    const { provider } = scripted([toolTurn('1', 'ci', {}), finalTurn('ok')]);
+    let called = '';
+    const task = makeTask(
+      { prompt: 'x', tools: [{ flow: 'ci' }] },
+      {
+        llm: provider,
+        runFlow: async (name) => {
+          called = name;
+          return { success: true, data: { steps: { build: { ok: true } } } };
+        },
+      },
+    );
+    const result = await task.run();
+    expect(called).toBe('ci');
+    const calls = result.data?.toolCalls as Array<{ name: string; ok: boolean; result: string }>;
+    expect(calls[0]).toMatchObject({ name: 'ci', ok: true });
+    expect(calls[0]?.result).toContain('steps');
+  });
+
+  it('invokes a sub-agent via ctx.runAgent with incremented depth', async () => {
+    const { provider } = scripted([toolTurn('1', 'worker', { prompt: 'sub' }), finalTurn('ok')]);
+    let seenDepth = -1;
+    let seenPrompt = '';
+    const task = makeTask(
+      { prompt: 'x', tools: [{ agent: 'worker' }] },
+      {
+        llm: provider,
+        __agentDepth: 2,
+        runAgent: async (_name, input, depth) => {
+          seenDepth = depth;
+          seenPrompt = String(input.prompt);
+          return { success: true, data: { text: 'sub-done' } };
+        },
+      },
+    );
+    const result = await task.run();
+    expect(seenDepth).toBe(3);
+    expect(seenPrompt).toBe('sub');
+    const calls = result.data?.toolCalls as Array<{ ok: boolean; result: string }>;
+    expect(calls[0]?.ok).toBe(true);
+    expect(calls[0]?.result).toContain('sub-done');
+  });
+
+  it('refuses to nest past maxAgentDepth', async () => {
+    const { provider } = scripted([toolTurn('1', 'worker', {}), finalTurn('done')]);
+    let ran = false;
+    const task = makeTask(
+      { prompt: 'x', maxAgentDepth: 2, tools: [{ agent: 'worker' }] },
+      {
+        llm: provider,
+        __agentDepth: 2,
+        runAgent: async () => {
+          ran = true;
+          return { success: true };
+        },
+      },
+    );
+    const result = await task.run();
+    expect(ran).toBe(false);
+    const calls = result.data?.toolCalls as Array<{ ok: boolean; result: string }>;
+    expect(calls[0]?.ok).toBe(false);
+    expect(calls[0]?.result).toMatch(/max agent depth/);
+  });
+
   it('runs a turn\'s tool calls concurrently', async () => {
     const { provider } = scripted([
       multiToolTurn([

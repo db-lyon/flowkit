@@ -17,15 +17,24 @@ import { validateJson, formatErrors } from './json-schema.js';
 import { preview, truncate } from './redact.js';
 import { mapLimit } from './concurrency.js';
 
-/** A tool the agent may call. Backed by a flowkit task or a context handler. */
+/**
+ * A tool the agent may call. Backed by an existing flowkit primitive — a
+ * `task`, a `flow`, or another `agent` — or by a context handler. Exactly one
+ * backing is used, resolved in that order; `flow`/`agent` require a FlowRunner
+ * context.
+ */
 export interface AgentToolSpec {
   /**
-   * Name exposed to the model. Defaults to `task`. Required when the tool is
-   * backed by a context handler (`ctx.agentTools[name]`) rather than a task.
+   * Name exposed to the model. Defaults to the referenced task/flow/agent.
+   * Required when the tool is backed by a context handler (`ctx.agentTools`).
    */
   name?: string;
   /** Flowkit task to invoke when the model calls this tool. */
   task?: string;
+  /** Flowkit flow to run when the model calls this tool. */
+  flow?: string;
+  /** Another agent to invoke (sub-agent) when the model calls this tool. */
+  agent?: string;
   /** Human/model-readable description of what the tool does. */
   description?: string;
   /**
@@ -59,6 +68,8 @@ export interface AgentTaskOptions extends AgentRunFields {
   maxConcurrency?: number;
   /** Cap on a single tool result's serialized size, in chars. Default 8000. */
   maxToolResultChars?: number;
+  /** Max depth of agent-calls-agent recursion. Default 6. */
+  maxAgentDepth?: number;
   /**
    * JSON Schema for the final answer. When set, once the agent stops calling
    * tools its answer is rendered and validated as schema-conforming JSON
@@ -105,8 +116,8 @@ export class AgentTask extends BaseTask<AgentTaskOptions> {
       throw new Error('agent requires a `prompt` string option');
     }
     for (const spec of this.options.tools ?? []) {
-      if (!spec.task && !spec.name) {
-        throw new Error('agent tool must declare a `task` or a `name`');
+      if (!spec.task && !spec.flow && !spec.agent && !spec.name) {
+        throw new Error('agent tool must reference a `task`, `flow`, or `agent`, or declare a `name`');
       }
     }
   }
@@ -137,7 +148,7 @@ export class AgentTask extends BaseTask<AgentTaskOptions> {
     const specsByName = new Map<string, AgentToolSpec>();
     const toolDefs: LLMToolDefinition[] = [];
     for (const spec of tools) {
-      const name = (spec.name ?? spec.task)!;
+      const name = (spec.name ?? spec.task ?? spec.flow ?? spec.agent)!;
       specsByName.set(name, spec);
       toolDefs.push({
         name,
@@ -289,7 +300,7 @@ export class AgentTask extends BaseTask<AgentTaskOptions> {
     this.logger.debug({ tool: name, args }, 'agent: invoking tool');
 
     try {
-      let raw: string;
+      let result: TaskResult;
       if (spec.task) {
         // Layer the model's arguments over the task's configured defaults, and
         // resolve via its class_path, so a task behaves the same as a tool as it
@@ -297,20 +308,34 @@ export class AgentTask extends BaseTask<AgentTaskOptions> {
         // FlowRunner (no taskDefinitions on the context).
         const def = this.ctx.taskDefinitions?.[spec.task];
         const classPath = def?.class_path ?? spec.task;
-        const options = { ...(def?.options ?? {}), ...args };
-        const result = await this.call(classPath, options);
-        if (!result.success) {
-          return fail(`Error: ${result.error?.message ?? 'tool task failed'}`);
+        result = await this.call(classPath, { ...(def?.options ?? {}), ...args });
+      } else if (spec.flow) {
+        if (!this.ctx.runFlow) {
+          return fail(`Error: flow tools require a FlowRunner context (ctx.runFlow missing).`);
         }
-        raw = serializeToolResult(result.data ?? {});
+        result = await this.ctx.runFlow(spec.flow, args);
+      } else if (spec.agent) {
+        if (!this.ctx.runAgent) {
+          return fail(`Error: agent tools require a FlowRunner context (ctx.runAgent missing).`);
+        }
+        const myDepth = this.ctx.__agentDepth ?? 0;
+        const maxDepth = this.options.maxAgentDepth ?? 6;
+        if (myDepth >= maxDepth) {
+          return fail(`Error: max agent depth (${maxDepth}) reached; refusing to nest deeper.`);
+        }
+        result = await this.ctx.runAgent(spec.agent, args, myDepth + 1);
       } else {
         const handler = this.ctx.agentTools?.[name] as LLMToolHandler | undefined;
         if (typeof handler !== 'function') {
-          return fail(`Error: tool "${name}" has no task and no ctx.agentTools handler.`);
+          return fail(`Error: tool "${name}" has no task/flow/agent and no ctx.agentTools handler.`);
         }
-        raw = serializeToolResult(await handler(args));
+        return { name, arguments: args, ok: true, result: truncate(serializeToolResult(await handler(args)), cap) };
       }
-      return { name, arguments: args, ok: true, result: truncate(raw, cap) };
+
+      if (!result.success) {
+        return fail(`Error: ${result.error?.message ?? 'tool invocation failed'}`);
+      }
+      return { name, arguments: args, ok: true, result: truncate(serializeToolResult(result.data ?? {}), cap) };
     } catch (err) {
       return fail(`Error: ${err instanceof Error ? err.message : String(err)}`);
     }

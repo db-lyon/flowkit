@@ -1,9 +1,10 @@
 import type { Logger } from '../logger.js';
 import { noopLogger } from '../logger.js';
-import type { TaskDefinition, FlowDefinition, FlowStep } from '../config/schema.js';
+import type { TaskDefinition, FlowDefinition, FlowStep, AgentDefinition } from '../config/schema.js';
 import type { TaskResult, RollbackRecord } from '../task/base-task.js';
 import type { TaskContext } from '../task/base-task.js';
-import type { TaskRegistry } from '../task/registry.js';
+import type { TaskRegistry, TaskConstructor } from '../task/registry.js';
+import { AgentTask, type AgentTaskOptions } from '../task/agent-task.js';
 import { resolveReferences, type ReferenceContext } from './references.js';
 
 // ---------------------------------------------------------------------------
@@ -134,6 +135,12 @@ export interface FlowRunnerConfig {
    * values, e.g. `{ project, org, env }`. `steps` and `error` are always built in.
    */
   references?: Record<string, unknown>;
+  /**
+   * Declarative agents. Each becomes runnable as a flow step (`task: <name>`)
+   * and as another agent's `agent:` tool, and the runner wires `ctx.runFlow` /
+   * `ctx.runAgent` so agents can call flows and sub-agents as tools.
+   */
+  agents?: Record<string, AgentDefinition>;
 }
 
 // ---------------------------------------------------------------------------
@@ -149,19 +156,95 @@ export class FlowRunner {
   private hooks: FlowRunnerHooks;
   private conditionEvaluator?: ConditionEvaluator;
   private references?: Record<string, unknown>;
+  private agents: Record<string, AgentDefinition>;
   private runDepth = 0;
 
   constructor(config: FlowRunnerConfig) {
     this.logger = (config.logger ?? noopLogger).child({ component: 'flow-runner' });
-    this.tasks = config.tasks;
     this.flows = config.flows;
     this.registry = config.registry;
     this.hooks = config.hooks ?? {};
     this.conditionEvaluator = config.conditionEvaluator;
     this.references = config.references;
+    this.agents = config.agents ?? {};
+
+    // Compile each agent into a task definition so it is runnable as a flow
+    // step (`task: <agentName>`) and as a task-backed tool. Explicit tasks of
+    // the same name win.
+    const agentTaskDefs: Record<string, TaskDefinition> = {};
+    for (const [name, def] of Object.entries(this.agents)) {
+      agentTaskDefs[name] = {
+        class_path: 'agent',
+        description: def.description,
+        options: this.compileAgent(def) as Record<string, unknown>,
+      };
+    }
+    this.tasks = { ...agentTaskDefs, ...config.tasks };
+
+    // Ensure the `agent` class resolves without the consumer wiring it, unless
+    // they already registered their own.
+    if (Object.keys(this.agents).length > 0 && !this.registry.listRegistered().includes('agent')) {
+      this.registry.register('agent', AgentTask as unknown as TaskConstructor);
+    }
+
     // Expose the configured task definitions so tasks invoked as agent tools
-    // inherit their class_path/options defaults (see AgentTask).
-    this.ctx = { ...config.context, registry: config.registry, taskDefinitions: config.tasks };
+    // inherit their class_path/options defaults (see AgentTask), and wire the
+    // flow/agent tool dispatchers.
+    this.ctx = { ...config.context, registry: config.registry, taskDefinitions: this.tasks };
+    this.ctx.runFlow = (flowName, params) => this.runFlowTool(flowName, params);
+    this.ctx.runAgent = (agentName, input, depth) => this.runAgentTool(agentName, input, depth);
+  }
+
+  /** Map an agent definition onto AgentTask options (everything but the prompt). */
+  private compileAgent(def: AgentDefinition): Omit<AgentTaskOptions, 'prompt'> {
+    const b = def.budget ?? {};
+    const opts: Record<string, unknown> = {
+      system: def.system,
+      model: def.model,
+      temperature: def.temperature,
+      maxTokens: def.maxTokens,
+      tools: def.tools,
+      schema: def.schema,
+      maxIterations: b.maxIterations,
+      tokenBudget: b.tokenBudget,
+      maxToolResultChars: b.maxToolResultChars,
+      maxConcurrency: b.maxConcurrency,
+      maxAgentDepth: b.maxAgentDepth,
+      timeout: def.timeout,
+      retries: def.retries,
+    };
+    for (const k of Object.keys(opts)) if (opts[k] === undefined) delete opts[k];
+    return opts as Omit<AgentTaskOptions, 'prompt'>;
+  }
+
+  /** Run a configured flow as an agent tool, returning a compact step summary. */
+  private async runFlowTool(
+    flowName: string,
+    params?: Record<string, unknown>,
+  ): Promise<TaskResult> {
+    if (!this.flows[flowName]) {
+      return { success: false, error: new Error(`unknown flow "${flowName}"`) };
+    }
+    const res = await this.run({ flowName, params });
+    const steps: Record<string, unknown> = {};
+    for (const s of res.steps) {
+      if (s.result?.data !== undefined) steps[s.name] = s.result.data;
+    }
+    return { success: res.success, error: res.error, data: { success: res.success, steps } };
+  }
+
+  /** Run a configured agent as an agent tool (sub-agent), threading recursion depth. */
+  private async runAgentTool(
+    agentName: string,
+    input: Record<string, unknown>,
+    depth: number,
+  ): Promise<TaskResult> {
+    const def = this.agents[agentName];
+    if (!def) return { success: false, error: new Error(`unknown agent "${agentName}"`) };
+    const prompt = typeof input.prompt === 'string' ? input.prompt : JSON.stringify(input);
+    const options = { ...this.compileAgent(def), prompt };
+    const childCtx: TaskContext = { ...this.ctx, __agentDepth: depth };
+    return new AgentTask(childCtx, options as AgentTaskOptions).run();
   }
 
   async run(options: FlowRunOptions): Promise<FlowRunResult> {

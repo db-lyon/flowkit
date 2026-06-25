@@ -16,6 +16,24 @@ export interface TaskContext {
    * as agent tools inherit their configured `class_path` and `options` defaults.
    */
   taskDefinitions?: Record<string, TaskDefinition>;
+  /**
+   * Run a configured flow as an agent tool. Wired by `FlowRunner`; absent when
+   * a task runs outside one. Returns a task-shaped result whose `data.steps`
+   * maps each step name to its output.
+   */
+  runFlow?: (flowName: string, params?: Record<string, unknown>) => Promise<TaskResult>;
+  /**
+   * Run a configured agent as an agent tool (the sub-agent fan-out path). Wired
+   * by `FlowRunner`. `depth` carries the caller's depth + 1 for recursion
+   * bounding; `AgentTask` passes it through.
+   */
+  runAgent?: (
+    agentName: string,
+    input: Record<string, unknown>,
+    depth: number,
+  ) => Promise<TaskResult>;
+  /** Current agent-recursion depth, threaded by `FlowRunner.runAgent`. */
+  __agentDepth?: number;
   [key: string]: unknown;
 }
 
