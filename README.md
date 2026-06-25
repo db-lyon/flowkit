@@ -171,8 +171,15 @@ consume it:
 
 - `agent_prompt` (`AgentPromptTask`) — single-shot prompt, with optional
   JSON-Schema structured output (validated, with a repair re-prompt).
-- `agent` (`AgentTask`) — a tool-calling loop. Tools are flowkit tasks or
-  context handlers, gated by an allowlist and per-tool argument validation.
+- `agent` (`AgentTask`) — a tool-calling loop. Tools reference flowkit tasks,
+  flows, or other agents (or context handlers), gated by an allowlist and
+  per-tool argument validation. Multiple tool calls in a turn (including
+  parallel sub-agents) run concurrently under a cap.
+
+Reusable agents live under an `agents:` root key and run as flow steps or as
+other agents' tools, with mandatory budgets (`maxIterations`, `tokenBudget`,
+`maxAgentDepth`). Iteration and concurrency live in the agent runtime, so a flow
+stays a sequential spine with no `loop:` or parallel-step primitive.
 
 ```yaml
 tasks:

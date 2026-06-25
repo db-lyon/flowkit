@@ -119,10 +119,14 @@ import { AgentTask } from '@db-lyon/flowkit';
 registry.register('agent', AgentTask as any);
 ```
 
-Tools are either **flowkit tasks** (declare `task:`) or **context handlers**
-(functions on `ctx.agentTools`, matched by `name:`). A task-backed tool inherits
-its configured `class_path` and `options` defaults — the model's arguments layer
-on top — so a task behaves the same as a tool as it does as a flow step.
+A tool references an existing flowkit primitive — a `task:`, a `flow:`, or
+another `agent:` — or a **context handler** (a function on `ctx.agentTools`,
+matched by `name:`). Tool dispatch reuses the registry and options machinery, so
+there is no separate tool concept to maintain. A task-backed tool inherits its
+configured `class_path` and `options` defaults, with the model's arguments
+layered on top, so a task behaves the same as a tool as it does as a flow step.
+`flow:` and `agent:` tools require a `FlowRunner` context (see "Declarative
+agents" below).
 
 ```yaml
 tasks:
@@ -169,6 +173,15 @@ its name, arguments, `ok`, and truncated `result`), `usage` (aggregated), and
 the agent reuses the final turn when it already conforms and only spends an
 extra round-trip on the structured pass when it does not.
 
+### Parallel tool calls
+
+When the model requests several tools in one turn — including several sub-agents
+— they execute concurrently, bounded by `maxConcurrency` (default 4), and their
+results are reassembled in call order so the conversation stays deterministic.
+This is the only concurrency mechanism: there is no parallel flow-step
+construct. Two parallel agentic loops are modeled as two sub-agents of one
+coordinating agent.
+
 ### Tool safety
 
 - **Allowlist** — only declared tools are callable. An unknown tool name is
@@ -180,6 +193,99 @@ extra round-trip on the structured pass when it does not.
   `maxToolResultChars` (default 8000).
 - **Bounded loops** — `maxIterations` (default 8) caps model turns; exceeding it
   fails the step.
+- **Bounded spend** — `tokenBudget` caps total input+output tokens across the
+  whole loop (and its sub-agents); reaching it fails the step.
+- **Bounded recursion** — `maxAgentDepth` (default 6) caps how deep
+  agents-calling-agents may nest.
+
+## Declarative agents
+
+Inline `agent` tasks are fine for one-offs, but agents you reuse across flows
+(and that call each other) belong in the `agents:` root key of your config. It is
+additive — CumulusCI never had it, so `tasks:` and `flows:` stay byte-identical.
+
+```yaml
+agents:
+  developer:
+    description: Researches and implements a change.
+    model: claude-opus-4-8
+    system: You implement the requested change using the available tools.
+    tools:
+      - task: shell
+        name: run_command
+        parameters:
+          type: object
+          required: [command]
+          properties: { command: { type: string } }
+    schema:
+      type: object
+      required: [summary]
+      properties: { summary: { type: string } }
+    budget:
+      maxIterations: 8
+      tokenBudget: 200000
+      maxConcurrency: 4
+      maxAgentDepth: 4
+```
+
+Wire the config and a provider into the runner. The runner compiles each agent,
+registers the `agent` class, and enables `flow:`/`agent:` tools:
+
+```typescript
+const runner = new FlowRunner({
+  tasks: config.tasks,
+  flows: config.flows,
+  agents: config.agents,            // <- the AI-native layer
+  registry,
+  context: { logger, llm: provider },
+});
+```
+
+A declared agent is usable two ways, both through machinery that already exists:
+
+- **As a flow step** — reference it like any task; supply its prompt in the step:
+
+  ```yaml
+  flows:
+    ship:
+      steps:
+        1: { flow: dev_org }
+        2: { task: developer, options: { prompt: "Implement ${steps.1.data.ticket}" } }
+        3: { task: submit_pr }
+  ```
+
+- **As another agent's tool** — list it under `tools:` with `agent:`. When the
+  parent calls it, the model's `prompt` argument becomes the sub-agent's input,
+  and the sub-agent's result is fed back. Recursion is bounded by `maxAgentDepth`.
+
+### The shape this targets
+
+A flow that builds a dev org, researches and develops (with parallel sub-agents),
+deploys, iterates on failed deploys, runs tests, iterates on failed tests, and
+opens a PR collapses to a sequential flow spine where every loop and fork lives
+inside an agent:
+
+```yaml
+agents:
+  developer: { system: "...", tools: [ { agent: researcher }, { task: shell } ] }
+  researcher: { system: "..." }              # fanned out as parallel sub-agents
+  deployer:   { system: "...", tools: [ { task: deploy_scratch } ] }  # edit/redeploy loop
+  tester:     { system: "...", tools: [ { task: run_tests }, { task: shell } ] }  # fix/retest loop
+
+flows:
+  ship:
+    steps:
+      1: { flow: dev_org }
+      2: { task: developer, options: { prompt: "..." } }
+      3: { task: deployer,  options: { prompt: "Deploy and fix failures." } }
+      4: { task: tester,    options: { prompt: "Make the tests pass." } }
+      5: { task: submit_pr }
+```
+
+Steps 3 and 4 are not flow loops. The fix-retest cycle is each agent's own
+tool-use loop. Parallel research in step 2 is the developer emitting several
+`researcher` sub-agent calls in one turn. No `loop:` and no parallel flow step
+appear anywhere.
 
 ## Robustness controls
 
