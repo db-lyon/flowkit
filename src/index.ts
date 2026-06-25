@@ -26,10 +26,28 @@ export { TaskRegistry } from './task/registry.js';
 export type { TaskConstructor } from './task/registry.js';
 export { AgentPromptTask } from './task/agent-prompt-task.js';
 export type { AgentPromptOptions } from './task/agent-prompt-task.js';
+export { AgentTask } from './task/agent-task.js';
+export type { AgentTaskOptions, AgentToolSpec } from './task/agent-task.js';
+export {
+  runCompletion,
+  pickRunOptions,
+  LLMTimeoutError,
+  StructuredOutputError,
+} from './task/llm-runner.js';
+export type { LLMRunOptions, LLMRunResult, AgentRunFields } from './task/llm-runner.js';
+export { validateJson, formatErrors } from './task/json-schema.js';
+export type { ValidationError, ValidationResult } from './task/json-schema.js';
+export { redact, truncate, preview } from './task/redact.js';
 export type {
   LLMProvider,
   LLMCompletionRequest,
   LLMCompletionResponse,
+  LLMMessage,
+  LLMRole,
+  LLMToolCall,
+  LLMToolDefinition,
+  LLMToolChoice,
+  LLMToolHandler,
 } from './task/llm-provider.js';
 
 // Flow

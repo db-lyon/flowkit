@@ -1,10 +1,21 @@
 import type { Logger } from '../logger.js';
 import { noopLogger } from '../logger.js';
 import type { TaskRegistry } from './registry.js';
+import type { LLMProvider, LLMToolHandler } from './llm-provider.js';
+import type { TaskDefinition } from '../config/schema.js';
 
 export interface TaskContext {
   logger?: Logger;
   registry?: TaskRegistry;
+  /** LLM provider consumed by `AgentPromptTask` / `AgentTask`. */
+  llm?: LLMProvider;
+  /** Programmatic agent tools, keyed by the name exposed to the model. */
+  agentTools?: Record<string, LLMToolHandler>;
+  /**
+   * Configured task definitions, supplied by `FlowRunner`, so that tasks used
+   * as agent tools inherit their configured `class_path` and `options` defaults.
+   */
+  taskDefinitions?: Record<string, TaskDefinition>;
   [key: string]: unknown;
 }
 

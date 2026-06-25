@@ -159,7 +159,9 @@ export class FlowRunner {
     this.hooks = config.hooks ?? {};
     this.conditionEvaluator = config.conditionEvaluator;
     this.references = config.references;
-    this.ctx = { ...config.context, registry: config.registry };
+    // Expose the configured task definitions so tasks invoked as agent tools
+    // inherit their class_path/options defaults (see AgentTask).
+    this.ctx = { ...config.context, registry: config.registry, taskDefinitions: config.tasks };
   }
 
   async run(options: FlowRunOptions): Promise<FlowRunResult> {
