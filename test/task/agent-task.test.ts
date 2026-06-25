@@ -25,6 +25,11 @@ const toolTurn = (id: string, name: string, args: Record<string, unknown>): LLMC
   toolCalls: [{ id, name, arguments: args }],
 });
 
+const multiToolTurn = (
+  calls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>,
+  usage?: { inputTokens?: number; outputTokens?: number },
+): LLMCompletionResponse => ({ text: '', finishReason: 'tool_use', toolCalls: calls, usage });
+
 const finalTurn = (text: string): LLMCompletionResponse => ({ text, finishReason: 'stop' });
 
 /** Echo task: returns its options as data. */
@@ -165,6 +170,53 @@ describe('AgentTask', () => {
     const result = await task.run();
     expect(result.success).toBe(true);
     expect(result.data?.parsed).toEqual({ answer: 5 });
+  });
+
+  it('runs a turn\'s tool calls concurrently', async () => {
+    const { provider } = scripted([
+      multiToolTurn([
+        { id: '1', name: 'work', arguments: { n: 1 } },
+        { id: '2', name: 'work', arguments: { n: 2 } },
+        { id: '3', name: 'work', arguments: { n: 3 } },
+      ]),
+      finalTurn('done'),
+    ]);
+    let inFlight = 0;
+    let peak = 0;
+    const task = makeTask(
+      { prompt: 'x', tools: [{ name: 'work' }] },
+      {
+        llm: provider,
+        agentTools: {
+          work: async () => {
+            inFlight++;
+            peak = Math.max(peak, inFlight);
+            await new Promise((r) => setTimeout(r, 10));
+            inFlight--;
+            return 'ok';
+          },
+        },
+      },
+    );
+    const result = await task.run();
+    expect(result.success).toBe(true);
+    expect(peak).toBeGreaterThan(1);
+    expect((result.data?.toolCalls as unknown[]).length).toBe(3);
+  });
+
+  it('fails once the token budget is exhausted', async () => {
+    const { provider } = scripted([
+      multiToolTurn([{ id: '1', name: 'work', arguments: {} }], { inputTokens: 100, outputTokens: 100 }),
+      finalTurn('should not reach'),
+    ]);
+    const task = makeTask(
+      { prompt: 'x', tokenBudget: 150, tools: [{ name: 'work' }] },
+      { llm: provider, agentTools: { work: () => 'ok' } },
+    );
+    const result = await task.run();
+    expect(result.success).toBe(false);
+    expect(result.error?.message).toMatch(/token budget \(150\)/);
+    expect((result.data?.usage as { inputTokens: number }).inputTokens).toBe(100);
   });
 
   it('truncates oversized tool results', async () => {

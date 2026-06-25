@@ -15,6 +15,7 @@ import {
 } from './llm-runner.js';
 import { validateJson, formatErrors } from './json-schema.js';
 import { preview, truncate } from './redact.js';
+import { mapLimit } from './concurrency.js';
 
 /** A tool the agent may call. Backed by a flowkit task or a context handler. */
 export interface AgentToolSpec {
@@ -47,6 +48,15 @@ export interface AgentTaskOptions extends AgentRunFields {
   tools?: AgentToolSpec[];
   /** Max model turns before the agent gives up. Default 8. */
   maxIterations?: number;
+  /**
+   * Aggregate token budget across the whole loop (input + output, summed over
+   * every turn and sub-agent). The loop stops and the step fails once it is
+   * reached. Default 0 (unbounded). Strongly recommended for any agent with
+   * tools — a tool loop with no token cap is unbounded spend.
+   */
+  tokenBudget?: number;
+  /** Max tool calls executed concurrently within a single turn. Default 4. */
+  maxConcurrency?: number;
   /** Cap on a single tool result's serialized size, in chars. Default 8000. */
   maxToolResultChars?: number;
   /**
@@ -118,6 +128,8 @@ export class AgentTask extends BaseTask<AgentTaskOptions> {
       temperature,
       tools = [],
       maxIterations = 8,
+      tokenBudget = 0,
+      maxConcurrency = 4,
       schema,
     } = this.options;
 
@@ -146,6 +158,14 @@ export class AgentTask extends BaseTask<AgentTaskOptions> {
 
     try {
       for (let iteration = 1; iteration <= maxIterations; iteration++) {
+        if (tokenBudget > 0 && usage.inputTokens + usage.outputTokens >= tokenBudget) {
+          return {
+            success: false,
+            error: new Error(`agent exceeded token budget (${tokenBudget})`),
+            data: { iterations: iteration - 1, toolCalls: toolCallLog, usage, finishReason },
+          };
+        }
+
         const response = await runCompletion(
           provider,
           {
@@ -198,10 +218,17 @@ export class AgentTask extends BaseTask<AgentTaskOptions> {
           return { success: true, data };
         }
 
-        // Record the assistant's tool-call turn, then run each tool.
+        // Record the assistant's tool-call turn, then run the calls. Multiple
+        // calls in one turn (e.g. parallel sub-agents) run concurrently under
+        // maxConcurrency; results are reassembled in call order so the
+        // conversation the model sees is deterministic.
         messages.push({ role: 'assistant', content: response.text, toolCalls: calls });
-        for (const call of calls) {
-          const record = await this.runTool(specsByName, call.name, call.arguments);
+        const records = await mapLimit(calls, maxConcurrency, (call) =>
+          this.runTool(specsByName, call.name, call.arguments),
+        );
+        for (let i = 0; i < calls.length; i++) {
+          const call = calls[i]!;
+          const record = records[i]!;
           toolCallLog.push(record);
           messages.push({
             role: 'tool',
