@@ -53,4 +53,32 @@ describe('AgentPromptTask', () => {
     expect(result.success).toBe(false);
     expect(result.error?.message).toMatch(/requires a `prompt`/);
   });
+
+  it('validates structured output and surfaces raw text on failure', async () => {
+    const provider: LLMProvider = { async complete() { return { text: 'not json' }; } };
+    const schema = { type: 'object', required: ['ok'] };
+    const task = makeTask({ prompt: 'x', schema, repairAttempts: 0 }, provider);
+    const result = await task.run();
+    expect(result.success).toBe(false);
+    expect(result.error?.name).toBe('StructuredOutputError');
+    expect(result.data?.text).toBe('not json');
+  });
+
+  it('flags truncated output via maxOutputChars', async () => {
+    const provider: LLMProvider = { async complete() { return { text: 'x'.repeat(50) }; } };
+    const task = makeTask({ prompt: 'x', maxOutputChars: 5 }, provider);
+    const result = await task.run();
+    expect(result.success).toBe(true);
+    expect(result.data?.truncated).toBe(true);
+    expect((result.data?.text as string).length).toBe(5);
+  });
+
+  it('passes finishReason and model through when reported', async () => {
+    const provider: LLMProvider = {
+      async complete() { return { text: 'hi', finishReason: 'stop', model: 'test-1' }; },
+    };
+    const task = makeTask({ prompt: 'x' }, provider);
+    const result = await task.run();
+    expect(result.data).toEqual({ text: 'hi', finishReason: 'stop', model: 'test-1' });
+  });
 });

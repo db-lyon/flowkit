@@ -1,10 +1,39 @@
 import type { Logger } from '../logger.js';
 import { noopLogger } from '../logger.js';
 import type { TaskRegistry } from './registry.js';
+import type { LLMProvider, LLMToolHandler } from './llm-provider.js';
+import type { TaskDefinition } from '../config/schema.js';
 
 export interface TaskContext {
   logger?: Logger;
   registry?: TaskRegistry;
+  /** LLM provider consumed by `AgentPromptTask` / `AgentTask`. */
+  llm?: LLMProvider;
+  /** Programmatic agent tools, keyed by the name exposed to the model. */
+  agentTools?: Record<string, LLMToolHandler>;
+  /**
+   * Configured task definitions, supplied by `FlowRunner`, so that tasks used
+   * as agent tools inherit their configured `class_path` and `options` defaults.
+   */
+  taskDefinitions?: Record<string, TaskDefinition>;
+  /**
+   * Run a configured flow as an agent tool. Wired by `FlowRunner`; absent when
+   * a task runs outside one. Returns a task-shaped result whose `data.steps`
+   * maps each step name to its output.
+   */
+  runFlow?: (flowName: string, params?: Record<string, unknown>) => Promise<TaskResult>;
+  /**
+   * Run a configured agent as an agent tool (the sub-agent fan-out path). Wired
+   * by `FlowRunner`. `depth` carries the caller's depth + 1 for recursion
+   * bounding; `AgentTask` passes it through.
+   */
+  runAgent?: (
+    agentName: string,
+    input: Record<string, unknown>,
+    depth: number,
+  ) => Promise<TaskResult>;
+  /** Current agent-recursion depth, threaded by `FlowRunner.runAgent`. */
+  __agentDepth?: number;
   [key: string]: unknown;
 }
 

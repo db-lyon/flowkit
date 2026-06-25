@@ -163,6 +163,42 @@ import { ShellTask } from '@db-lyon/flowkit';
 registry.register('shell', ShellTask as any);
 ```
 
+### AI agents
+
+Run LLM calls as steps. Flowkit has **no SDK dependencies** — you wire a
+model-agnostic `LLMProvider` onto the task context as `ctx.llm`, and two tasks
+consume it:
+
+- `agent_prompt` (`AgentPromptTask`) — single-shot prompt, with optional
+  JSON-Schema structured output (validated, with a repair re-prompt).
+- `agent` (`AgentTask`) — a tool-calling loop. Tools reference flowkit tasks,
+  flows, or other agents (or context handlers), gated by an allowlist and
+  per-tool argument validation. Multiple tool calls in a turn (including
+  parallel sub-agents) run concurrently under a cap.
+
+Reusable agents live under an `agents:` root key and run as flow steps or as
+other agents' tools, with mandatory budgets (`maxIterations`, `tokenBudget`,
+`maxAgentDepth`). Iteration and concurrency live in the agent runtime, so a flow
+stays a sequential spine with no `loop:` or parallel-step primitive.
+
+```yaml
+tasks:
+  extract:
+    class_path: agent_prompt
+    options:
+      prompt: "Pull the ticket fields from:\n${steps.1.data.text}"
+      schema:
+        type: object
+        required: [title, priority]
+        properties:
+          title: { type: string }
+          priority: { type: string, enum: [low, medium, high] }
+```
+
+Every call is hardened by a shared core: per-call `timeout` (with provider
+abort), `retries` with exponential backoff, structured-output validation +
+repair, and output-size caps. See [docs/ai-agents.md](docs/ai-agents.md).
+
 ### Nested flows
 
 A step can reference another flow instead of a task:
@@ -330,6 +366,7 @@ import { topologicalSort } from '@db-lyon/flowkit/dag';
 
 - [Getting started](docs/getting-started.md) — step-by-step setup guide
 - [Custom tasks](docs/custom-tasks.md) — writing and registering tasks
+- [AI agents](docs/ai-agents.md) — LLM prompts, structured output, tool-calling agents
 - [Configuration](docs/configuration.md) — YAML schema, layering, deep merge
 - [API reference](docs/api-reference.md) — full type and function reference
 

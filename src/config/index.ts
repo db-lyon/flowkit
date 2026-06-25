@@ -5,6 +5,9 @@ export {
   TaskDefinitionSchema,
   FlowStepSchema,
   FlowDefinitionSchema,
+  AgentToolSchema,
+  AgentBudgetSchema,
+  AgentDefinitionSchema,
   EngineConfigSchema,
 } from './schema.js';
 
@@ -13,6 +16,9 @@ export type {
   TaskDefinition,
   FlowStep,
   FlowDefinition,
+  AgentTool,
+  AgentBudget,
+  AgentDefinition,
   EngineConfig,
 } from './schema.js';
 

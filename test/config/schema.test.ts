@@ -3,6 +3,7 @@ import {
   TaskDefinitionSchema,
   FlowStepSchema,
   FlowDefinitionSchema,
+  AgentDefinitionSchema,
   EngineConfigSchema,
 } from '../../src/config/schema.js';
 
@@ -125,5 +126,36 @@ describe('EngineConfigSchema', () => {
     });
     expect(result.tasks.deploy.class_path).toBe('my.Deploy');
     expect(result.flows.ci.steps['1'].task).toBe('deploy');
+  });
+
+  it('defaults agents to an empty record', () => {
+    const result = EngineConfigSchema.parse({ tasks: {}, flows: {} });
+    expect(result.agents).toEqual({});
+  });
+});
+
+describe('AgentDefinitionSchema', () => {
+  it('parses a full agent with tool refs and budget', () => {
+    const result = AgentDefinitionSchema.parse({
+      model: 'opus',
+      system: 'do the thing',
+      tools: [
+        { task: 'shell', name: 'run', parameters: { type: 'object' } },
+        { flow: 'ci' },
+        { agent: 'qa' },
+      ],
+      schema: { type: 'object' },
+      budget: { maxIterations: 6, tokenBudget: 100000, maxConcurrency: 3 },
+    });
+    expect(result.tools).toHaveLength(3);
+    expect(result.budget?.tokenBudget).toBe(100000);
+  });
+
+  it('defaults tools to an empty array', () => {
+    expect(AgentDefinitionSchema.parse({}).tools).toEqual([]);
+  });
+
+  it('rejects a tool with no reference or name', () => {
+    expect(() => AgentDefinitionSchema.parse({ tools: [{ description: 'x' }] })).toThrow();
   });
 });
