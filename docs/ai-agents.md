@@ -72,7 +72,7 @@ tasks:
     class_path: agent_prompt
     options:
       system: You extract action items from meeting notes.
-      prompt: "Summarize:\n${steps.1.data.text}"
+      prompt: "Summarize:\n${steps.1.text}"
 ```
 
 `result.data`: `text` (always), plus `parsed`, `usage`, `finishReason`, `model`,
@@ -89,7 +89,7 @@ tasks:
   extract:
     class_path: agent_prompt
     options:
-      prompt: "Pull the ticket fields from:\n${steps.1.data.text}"
+      prompt: "Pull the ticket fields from:\n${steps.1.text}"
       schema:
         type: object
         required: [title, priority]
@@ -101,6 +101,12 @@ tasks:
 On success `result.data.parsed` holds the validated object. If the model never
 conforms, the step fails with a `StructuredOutputError` and `result.data.text`
 carries the last raw output for debugging.
+
+> **Reference paths are rooted at the step's `data`.** In `${steps.<id>.<path>}`,
+> `<path>` is relative to that step's `result.data`, so a later step reads a
+> structured field as `${steps.extract.parsed.title}` or the raw text as
+> `${steps.1.text}` — **not** `${steps.1.data.text}` (that resolves to
+> `data.data.text`, which is undefined). `<id>` is a step number or a task name.
 
 The bundled validator covers the JSON Schema subset used for structured output
 (`type`, `enum`, `const`, `required`, `properties`, `items`,
@@ -255,7 +261,7 @@ A declared agent is usable two ways, both through machinery that already exists:
     ship:
       steps:
         1: { flow: dev_org }
-        2: { task: developer, options: { prompt: "Implement ${steps.1.data.ticket}" } }
+        2: { task: developer, options: { prompt: "Implement ${steps.1.ticket}" } }
         3: { task: submit_pr }
   ```
 
@@ -292,6 +298,43 @@ tool-use loop. Parallel research in step 2 is the developer emitting several
 `researcher` sub-agent calls in one turn. No `loop:` and no parallel flow step
 appear anywhere.
 
+## Testing agents
+
+Test the agent loop without a live model by passing a stub `LLMProvider` that
+scripts the turns: each `complete()` call returns the next response, and a
+`finishReason: 'tool_use'` response with `toolCalls` drives the loop into your
+tools. Assert on the returned `data` (final `text`/`parsed`, the `toolCalls`
+record, `usage`).
+
+```typescript
+import { AgentTask } from '@db-lyon/flowkit';
+import type { LLMProvider, LLMCompletionResponse } from '@db-lyon/flowkit';
+
+// Scripted provider: returns the responses in order.
+function scripted(responses: LLMCompletionResponse[]): LLMProvider {
+  let i = 0;
+  return { async complete() { return responses[Math.min(i++, responses.length - 1)]!; } };
+}
+
+const provider = scripted([
+  // turn 1: ask for a tool
+  { text: '', finishReason: 'tool_use', toolCalls: [{ id: '1', name: 'add', arguments: { a: 2, b: 3 } }] },
+  // turn 2: final answer
+  { text: 'the sum is 5', finishReason: 'stop' },
+]);
+
+const task = new AgentTask(
+  { llm: provider, agentTools: { add: ({ a, b }) => ({ sum: (a as number) + (b as number) }) } },
+  { prompt: 'add 2 and 3', tools: [{ name: 'add', parameters: { type: 'object', required: ['a', 'b'] } }] },
+);
+const result = await task.run();
+// result.data.text === 'the sum is 5'; result.data.toolCalls[0].ok === true
+```
+
+For sub-agent and flow tools, drive them through a `FlowRunner` configured with
+`agents:` and a provider that branches on `req.system` so one stub can serve
+several agents.
+
 ## Robustness controls
 
 These option fields apply to both `agent_prompt` and `agent`:
@@ -310,11 +353,13 @@ directly — it is the shared core both tasks build on, and it accepts a
 
 ## Security notes
 
-- **Prompt injection.** Templating prior step output (`${steps...}`) or tool
-  results into a prompt means untrusted text can reach the model. Treat model
-  output as untrusted: validate it (use `schema`), and scope what task-backed
-  tools can do — an `agent` whose toolbox includes `shell` can run whatever the
-  model asks. Prefer narrow, read-only tools.
+- **Prompt injection.** Templating prior step output (`${steps...}`) or feeding
+  tool results (file contents, shell output) back to the model means untrusted
+  text reaches it and can carry instructions. A `schema` does **not** defend
+  against this — it validates the shape of *outbound* output, not the inbound
+  text that carries an injection. The real control is the toolbox: an `agent`
+  whose tools include `shell` can run whatever the model is talked into. Prefer
+  narrow, read-only tools and scope every tool tightly.
 - **Secret hygiene.** The tasks log prompts only at `debug`, and previews are
   whitespace-collapsed and length-capped. Use `redact()` before logging
   provider config so API keys and tokens never reach your logs.

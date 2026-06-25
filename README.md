@@ -186,7 +186,7 @@ tasks:
   extract:
     class_path: agent_prompt
     options:
-      prompt: "Pull the ticket fields from:\n${steps.1.data.text}"
+      prompt: "Pull the ticket fields from:\n${steps.1.text}"
       schema:
         type: object
         required: [title, priority]
