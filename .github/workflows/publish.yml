@@ -58,6 +58,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          # The runner has no git identity; annotated tags need one.
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           V="v${{ steps.version.outputs.local }}"
           git tag -a "$V" -m "$V"
           git push origin "$V"
