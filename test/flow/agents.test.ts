@@ -40,6 +40,7 @@ function runner(
   agents: Record<string, AgentDefinition>,
   flows: Record<string, unknown>,
   tasks: Record<string, unknown> = {},
+  provider: LLMProvider = branchingProvider(),
 ) {
   const registry = new TaskRegistry().register('echo', EchoTask as never);
   return new FlowRunner({
@@ -47,7 +48,7 @@ function runner(
     flows: flows as never,
     agents,
     registry,
-    context: { llm: branchingProvider() },
+    context: { llm: provider },
   });
 }
 
@@ -81,7 +82,7 @@ describe('FlowRunner agents', () => {
   it('lets an agent call a sub-agent as a tool', async () => {
     const r = runner(
       {
-        coord: { system: 'COORD', tools: [{ agent: 'worker' }] } as never,
+        coord: { system: 'COORD', tools: [{ agent: 'worker' }], budget: { tokenBudget: 100000 } } as never,
         worker: { system: 'WORKER', tools: [] } as never,
       },
       { main: { steps: { 1: { task: 'coord', options: { prompt: 'delegate' } } } } },
@@ -92,5 +93,78 @@ describe('FlowRunner agents', () => {
     expect(data.text).toBe('coord-done');
     expect(data.toolCalls[0]).toMatchObject({ name: 'worker', ok: true });
     expect(data.toolCalls[0]?.result).toContain('worker-done');
+  });
+
+  it('charges sub-agent spend against the parent budget (aggregate ceiling)', async () => {
+    // coord burns 100, then its sub-agent worker burns 200 against the shared
+    // ledger; coord's 250 budget then trips on the next turn.
+    const provider: LLMProvider = {
+      async complete(req) {
+        const sys = req.system ?? '';
+        if (sys.includes('WORKER')) {
+          return { text: 'w', finishReason: 'stop', usage: { inputTokens: 100, outputTokens: 100 } };
+        }
+        // COORD: always ask for the worker, so only the budget can stop it.
+        return {
+          text: '',
+          finishReason: 'tool_use',
+          toolCalls: [{ id: '1', name: 'worker', arguments: { prompt: 's' } }],
+          usage: { inputTokens: 50, outputTokens: 50 },
+        };
+      },
+    };
+    const r = runner(
+      {
+        coord: { system: 'COORD', tools: [{ agent: 'worker' }], budget: { tokenBudget: 250 } } as never,
+        worker: { system: 'WORKER', tools: [] } as never,
+      },
+      { main: { steps: { 1: { task: 'coord', options: { prompt: 'go' } } } } },
+      {},
+      provider,
+    );
+    const res = await r.run({ flowName: 'main' });
+    expect(res.success).toBe(false);
+    expect(res.steps[0]?.result?.error?.message).toMatch(/token budget \(250\)/);
+  });
+
+  it('does not truncate a sub-agent result like opaque tool output', async () => {
+    const big = 'x'.repeat(9000);
+    const provider: LLMProvider = {
+      async complete(req) {
+        const sys = req.system ?? '';
+        if (sys.includes('WORKER')) return { text: big, finishReason: 'stop' };
+        const counts = (provider as { _n?: number })._n ?? 0;
+        (provider as { _n?: number })._n = counts + 1;
+        return counts === 0
+          ? { text: '', finishReason: 'tool_use', toolCalls: [{ id: '1', name: 'worker', arguments: { prompt: 's' } }] }
+          : { text: 'done', finishReason: 'stop' };
+      },
+    };
+    const r = runner(
+      {
+        coord: { system: 'COORD', tools: [{ agent: 'worker' }], budget: { tokenBudget: 100000 } } as never,
+        worker: { system: 'WORKER', tools: [] } as never,
+      },
+      { main: { steps: { 1: { task: 'coord', options: { prompt: 'go' } } } } },
+      {},
+      provider,
+    );
+    const res = await r.run({ flowName: 'main' });
+    expect(res.success).toBe(true);
+    const data = res.steps[0]?.result?.data as { toolCalls: Array<{ result: string }> };
+    expect(data.toolCalls[0]?.result.length).toBeGreaterThan(8000);
+  });
+
+  it('fails an agent that has agent tools but no budget', async () => {
+    const r = runner(
+      {
+        coord: { system: 'COORD', tools: [{ agent: 'worker' }] } as never,
+        worker: { system: 'WORKER', tools: [] } as never,
+      },
+      { main: { steps: { 1: { task: 'coord', options: { prompt: 'go' } } } } },
+    );
+    const res = await r.run({ flowName: 'main' });
+    expect(res.success).toBe(false);
+    expect(res.steps[0]?.result?.error?.message).toMatch(/must set a `tokenBudget`/);
   });
 });

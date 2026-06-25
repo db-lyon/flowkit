@@ -16,6 +16,13 @@ import {
 import { validateJson, formatErrors } from './json-schema.js';
 import { preview, truncate } from './redact.js';
 import { mapLimit } from './concurrency.js';
+import {
+  createLedger,
+  chargeLedger,
+  ledgerExhausted,
+  exhaustedLimit,
+  type TokenLedger,
+} from './token-ledger.js';
 
 /**
  * A tool the agent may call. Backed by an existing flowkit primitive — a
@@ -68,6 +75,14 @@ export interface AgentTaskOptions extends AgentRunFields {
   maxConcurrency?: number;
   /** Cap on a single tool result's serialized size, in chars. Default 8000. */
   maxToolResultChars?: number;
+  /**
+   * Cap on a sub-agent (`agent:` tool) result's serialized size, in chars.
+   * Separate from `maxToolResultChars` because a sub-agent's answer often
+   * carries code, diffs, or stack traces that an 8000-char opaque-tool cap would
+   * clip mid-payload. Default 0 (unbounded — rely on the sub-agent's own budget
+   * and output caps).
+   */
+  maxAgentResultChars?: number;
   /** Max depth of agent-calls-agent recursion. Default 6. */
   maxAgentDepth?: number;
   /**
@@ -115,10 +130,24 @@ export class AgentTask extends BaseTask<AgentTaskOptions> {
     if (!this.options?.prompt || typeof this.options.prompt !== 'string') {
       throw new Error('agent requires a `prompt` string option');
     }
+    let hasAgentTool = false;
     for (const spec of this.options.tools ?? []) {
       if (!spec.task && !spec.flow && !spec.agent && !spec.name) {
         throw new Error('agent tool must reference a `task`, `flow`, or `agent`, or declare a `name`');
       }
+      if (spec.agent) hasAgentTool = true;
+    }
+    // Sub-agent fan-out is the multiplicative-spend case. Require a budget for
+    // it unless an enclosing agent already established one (shared ledger).
+    if (
+      hasAgentTool &&
+      !((this.options.tokenBudget ?? 0) > 0) &&
+      !this.ctx.__tokenLedger
+    ) {
+      throw new Error(
+        'agent with `agent:` tools must set a `tokenBudget` (or run under one) — ' +
+          'sub-agent fan-out is unbounded otherwise',
+      );
     }
   }
 
@@ -157,10 +186,20 @@ export class AgentTask extends BaseTask<AgentTaskOptions> {
       });
     }
 
+    // Budget ledger: adopt the enclosing agent's ledger (so this whole subtree
+    // counts against one ceiling), and open a tighter nested frame if this agent
+    // sets its own tokenBudget. Charges roll up through every frame.
+    const inheritedLedger = this.ctx.__tokenLedger;
+    const ledger: TokenLedger | undefined =
+      tokenBudget > 0 ? createLedger(tokenBudget, inheritedLedger) : inheritedLedger;
+
     const messages: LLMMessage[] = [{ role: 'user', content: prompt }];
     const toolCallLog: ToolCallRecord[] = [];
     const usage = { inputTokens: 0, outputTokens: 0 };
     let finishReason: string | undefined;
+
+    const charge = (resp: LLMCompletionResponse) =>
+      chargeLedger(ledger, (resp.usage?.inputTokens ?? 0) + (resp.usage?.outputTokens ?? 0));
 
     this.logger.debug(
       { model, tools: toolDefs.map((t) => t.name), prompt: preview(prompt) },
@@ -169,10 +208,11 @@ export class AgentTask extends BaseTask<AgentTaskOptions> {
 
     try {
       for (let iteration = 1; iteration <= maxIterations; iteration++) {
-        if (tokenBudget > 0 && usage.inputTokens + usage.outputTokens >= tokenBudget) {
+        const hitLimit = exhaustedLimit(ledger);
+        if (hitLimit !== undefined) {
           return {
             success: false,
-            error: new Error(`agent exceeded token budget (${tokenBudget})`),
+            error: new Error(`agent exceeded token budget (${hitLimit})`),
             data: { iterations: iteration - 1, toolCalls: toolCallLog, usage, finishReason },
           };
         }
@@ -192,6 +232,7 @@ export class AgentTask extends BaseTask<AgentTaskOptions> {
           this.logger,
         );
         accumulateUsage(usage, response);
+        charge(response);
         finishReason = response.finishReason;
 
         const calls = response.toolCalls ?? [];
@@ -220,6 +261,7 @@ export class AgentTask extends BaseTask<AgentTaskOptions> {
                 runOpts,
               );
               accumulateUsage(usage, structured);
+              charge(structured);
               data.text = structured.text;
               data.parsed = structured.parsed;
               if (usage.inputTokens || usage.outputTokens) data.usage = usage;
@@ -235,7 +277,7 @@ export class AgentTask extends BaseTask<AgentTaskOptions> {
         // conversation the model sees is deterministic.
         messages.push({ role: 'assistant', content: response.text, toolCalls: calls });
         const records = await mapLimit(calls, maxConcurrency, (call) =>
-          this.runTool(specsByName, call.name, call.arguments),
+          this.runTool(specsByName, call.name, call.arguments, ledger),
         );
         for (let i = 0; i < calls.length; i++) {
           const call = calls[i]!;
@@ -281,14 +323,20 @@ export class AgentTask extends BaseTask<AgentTaskOptions> {
     specsByName: Map<string, AgentToolSpec>,
     name: string,
     args: Record<string, unknown>,
+    ledger: TokenLedger | undefined,
   ): Promise<ToolCallRecord> {
-    const cap = this.options.maxToolResultChars ?? 8000;
     const fail = (result: string): ToolCallRecord => ({ name, arguments: args, ok: false, result });
 
     const spec = specsByName.get(name);
     if (!spec) {
       return fail(`Error: unknown tool "${name}". It is not in the allowed tool list.`);
     }
+
+    // Sub-agent answers get their own (default-unbounded) cap so code/diffs are
+    // not clipped like opaque tool output.
+    const cap = spec.agent
+      ? this.options.maxAgentResultChars ?? Number.POSITIVE_INFINITY
+      : this.options.maxToolResultChars ?? 8000;
 
     if (spec.parameters) {
       const check = validateJson(args, spec.parameters);
@@ -323,7 +371,8 @@ export class AgentTask extends BaseTask<AgentTaskOptions> {
         if (myDepth >= maxDepth) {
           return fail(`Error: max agent depth (${maxDepth}) reached; refusing to nest deeper.`);
         }
-        result = await this.ctx.runAgent(spec.agent, args, myDepth + 1);
+        // Pass our ledger down so the sub-agent's spend charges this budget too.
+        result = await this.ctx.runAgent(spec.agent, args, myDepth + 1, ledger);
       } else {
         const handler = this.ctx.agentTools?.[name] as LLMToolHandler | undefined;
         if (typeof handler !== 'function') {

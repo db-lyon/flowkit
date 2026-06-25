@@ -172,6 +172,24 @@ describe('AgentTask', () => {
     expect(result.data?.parsed).toEqual({ answer: 5 });
   });
 
+  it('requires a tokenBudget when the toolset includes an agent', async () => {
+    const { provider } = scripted([finalTurn('done')]);
+    const task = makeTask({ prompt: 'x', tools: [{ agent: 'worker' }] }, { llm: provider });
+    const result = await task.run();
+    expect(result.success).toBe(false);
+    expect(result.error?.message).toMatch(/must set a `tokenBudget`/);
+  });
+
+  it('allows agent tools without an own budget when running under one', async () => {
+    const { provider } = scripted([finalTurn('done')]);
+    const task = makeTask(
+      { prompt: 'x', tools: [{ agent: 'worker' }] },
+      { llm: provider, __tokenLedger: { limit: 1000, spent: 0 } },
+    );
+    const result = await task.run();
+    expect(result.success).toBe(true);
+  });
+
   it('invokes a flow tool via ctx.runFlow', async () => {
     const { provider } = scripted([toolTurn('1', 'ci', {}), finalTurn('ok')]);
     let called = '';
@@ -197,7 +215,7 @@ describe('AgentTask', () => {
     let seenDepth = -1;
     let seenPrompt = '';
     const task = makeTask(
-      { prompt: 'x', tools: [{ agent: 'worker' }] },
+      { prompt: 'x', tokenBudget: 100000, tools: [{ agent: 'worker' }] },
       {
         llm: provider,
         __agentDepth: 2,
@@ -220,7 +238,7 @@ describe('AgentTask', () => {
     const { provider } = scripted([toolTurn('1', 'worker', {}), finalTurn('done')]);
     let ran = false;
     const task = makeTask(
-      { prompt: 'x', maxAgentDepth: 2, tools: [{ agent: 'worker' }] },
+      { prompt: 'x', tokenBudget: 100000, maxAgentDepth: 2, tools: [{ agent: 'worker' }] },
       {
         llm: provider,
         __agentDepth: 2,
