@@ -7,6 +7,10 @@ import type { TaskRegistry, TaskConstructor } from '../task/registry.js';
 import { AgentTask, type AgentTaskOptions } from '../task/agent-task.js';
 import type { TokenLedger } from '../task/token-ledger.js';
 import { resolveReferences, type ReferenceContext } from './references.js';
+import {
+  resolveTaskDefinition as resolveConfiguredTaskDefinition,
+  resolveTaskOptions,
+} from '../task/task-resolution.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -266,19 +270,25 @@ export class FlowRunner {
    * on its own or as a step. `options` merge over the task's configured defaults.
    */
   async runTask(taskName: string, options: Record<string, unknown> = {}): Promise<TaskResult> {
-    const taskDef = this.resolveTaskDefinition(taskName);
     this.logger.info({ task: taskName }, `Running task ${taskName}`);
-    // Interpolate ${ns.path} references in option values (no prior steps here).
-    const merged = resolveReferences({ ...taskDef.options, ...options }, {
+    const referenceContext: ReferenceContext = {
       steps: [],
       namespaces: this.references,
-    });
-    return this.executeTask(taskDef.class_path, merged);
+    };
+    const taskDef = resolveTaskOptions(taskName, this.tasks, options, referenceContext);
+    return this.executeTask(taskDef.classPath, taskDef.options, referenceContext);
   }
 
   /** Instantiate and run a task with fully-resolved options (the shared leaf). */
-  private async executeTask(classPath: string, options: Record<string, unknown>): Promise<TaskResult> {
-    const task = await this.registry.create(classPath, this.ctx, options);
+  private async executeTask(
+    classPath: string,
+    options: Record<string, unknown>,
+    referenceContext?: ReferenceContext,
+  ): Promise<TaskResult> {
+    const taskCtx = referenceContext
+      ? { ...this.ctx, taskReferenceContext: referenceContext }
+      : this.ctx;
+    const task = await this.registry.create(classPath, taskCtx, options);
     return task.run();
   }
 
@@ -872,7 +882,7 @@ export class FlowRunner {
       `Executing step ${step.stepNumber}: ${step.name}`,
     );
 
-    return this.executeTask(taskDef.class_path, mergedOptions);
+    return this.executeTask(taskDef.class_path, mergedOptions, refCtx);
   }
 
   private async performRollback(
@@ -884,8 +894,13 @@ export class FlowRunner {
       const rec = records[i]!;
       result.attempted++;
       try {
-        const taskDef = this.resolveTaskDefinition(rec.taskName);
-        const r = await this.executeTask(taskDef.class_path, { ...taskDef.options, ...rec.payload });
+        const taskDef = resolveTaskOptions(
+          rec.taskName,
+          this.tasks,
+          rec.payload,
+          { steps: [], namespaces: this.references },
+        );
+        const r = await this.executeTask(taskDef.classPath, taskDef.options);
         if (r.success) {
           result.succeeded++;
         } else {
@@ -909,13 +924,8 @@ export class FlowRunner {
     class_path: string;
     options: Record<string, unknown>;
   } {
-    const taskDef = this.tasks[taskName];
-    if (taskDef) {
-      // An option-only entry (no class_path) layers options onto a base of the
-      // same name; absent a base class_path, resolve by the task name itself.
-      return { class_path: taskDef.class_path ?? taskName, options: taskDef.options ?? {} };
-    }
-    return { class_path: taskName, options: {} };
+    const taskDef = resolveConfiguredTaskDefinition(taskName, this.tasks);
+    return { class_path: taskDef.classPath, options: taskDef.options };
   }
 }
 

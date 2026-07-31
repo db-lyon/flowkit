@@ -4,6 +4,8 @@ import type { TaskRegistry } from './registry.js';
 import type { LLMProvider, LLMToolHandler } from './llm-provider.js';
 import type { TaskDefinition } from '../config/schema.js';
 import type { TokenLedger } from './token-ledger.js';
+import type { ReferenceContext } from '../flow/references.js';
+import { resolveTaskOptions } from './task-resolution.js';
 
 export interface TaskContext {
   logger?: Logger;
@@ -17,6 +19,8 @@ export interface TaskContext {
    * as agent tools inherit their configured `class_path` and `options` defaults.
    */
   taskDefinitions?: Record<string, TaskDefinition>;
+  /** Reference scope supplied by FlowRunner for task-to-task option interpolation. */
+  taskReferenceContext?: ReferenceContext;
   /**
    * Run a configured flow as an agent tool. Wired by `FlowRunner`; absent when
    * a task runs outside one. Returns a task-shaped result whose `data.steps`
@@ -85,7 +89,9 @@ export abstract class BaseTask<TOpts = Record<string, unknown>> {
    *
    * A FlowRunner supplies configured definitions on the context. Honor that
    * indirection here too: task-to-task calls must use the same class_path and
-   * default options as an ordinary flow step or an agent tool.
+   * default options as an ordinary flow step or an agent tool, including
+   * `${ns.path}` reference interpolation when the runner supplied a reference
+   * context for the current step.
    * Returns an unexecuted task instance — call `.run()` on it yourself when you
    * need to inspect or configure the task before running.
    */
@@ -100,11 +106,16 @@ export abstract class BaseTask<TOpts = Record<string, unknown>> {
           'Tasks can only resolve other tasks when run via FlowRunner.',
       );
     }
-    const definition = this.ctx.taskDefinitions?.[taskName];
+    const taskDef = resolveTaskOptions(
+      taskName,
+      this.ctx.taskDefinitions,
+      options,
+      this.ctx.taskReferenceContext,
+    );
     return registry.create(
-      definition?.class_path ?? taskName,
+      taskDef.classPath,
       this.ctx,
-      { ...(definition?.options ?? {}), ...(options ?? {}) },
+      taskDef.options,
     ) as Promise<T>;
   }
 
