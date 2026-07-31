@@ -4,8 +4,8 @@ import type { TaskRegistry } from './registry.js';
 import type { LLMProvider, LLMToolHandler } from './llm-provider.js';
 import type { TaskDefinition } from '../config/schema.js';
 import type { TokenLedger } from './token-ledger.js';
-import type { ReferenceContext } from '../flow/references.js';
-import { resolveTaskOptions } from './task-resolution.js';
+import type { ReferenceContext } from '../references.js';
+import { resolveTaskCall } from './task-resolution.js';
 
 export interface TaskContext {
   logger?: Logger;
@@ -19,7 +19,13 @@ export interface TaskContext {
    * as agent tools inherit their configured `class_path` and `options` defaults.
    */
   taskDefinitions?: Record<string, TaskDefinition>;
-  /** Reference scope supplied by FlowRunner for task-to-task option interpolation. */
+  /**
+   * Reference scope for `${ns.path}` interpolation of a called task's
+   * *configured defaults*. Supplied by `FlowRunner` and propagated into nested
+   * tasks and sub-agents, so a task resolves the same references however deep
+   * it is invoked. Options passed at the call site are runtime data and are
+   * never interpolated.
+   */
   taskReferenceContext?: ReferenceContext;
   /**
    * Run a configured flow as an agent tool. Wired by `FlowRunner`; absent when
@@ -90,8 +96,9 @@ export abstract class BaseTask<TOpts = Record<string, unknown>> {
    * A FlowRunner supplies configured definitions on the context. Honor that
    * indirection here too: task-to-task calls must use the same class_path and
    * default options as an ordinary flow step or an agent tool, including
-   * `${ns.path}` reference interpolation when the runner supplied a reference
-   * context for the current step.
+   * `${ns.path}` interpolation of those defaults. `options` are this task's own
+   * runtime data and stay literal (see `resolveTaskCall`).
+   *
    * Returns an unexecuted task instance — call `.run()` on it yourself when you
    * need to inspect or configure the task before running.
    */
@@ -106,17 +113,13 @@ export abstract class BaseTask<TOpts = Record<string, unknown>> {
           'Tasks can only resolve other tasks when run via FlowRunner.',
       );
     }
-    const taskDef = resolveTaskOptions(
+    const resolved = resolveTaskCall(
       taskName,
       this.ctx.taskDefinitions,
       options,
       this.ctx.taskReferenceContext,
     );
-    return registry.create(
-      taskDef.classPath,
-      this.ctx,
-      taskDef.options,
-    ) as Promise<T>;
+    return registry.create(resolved.classPath, this.ctx, resolved.options) as Promise<T>;
   }
 
   /**

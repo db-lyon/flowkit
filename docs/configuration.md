@@ -189,6 +189,8 @@ flows:
 
 Rollback runs after `on_failure` and before `finally`. Nested flow steps' rollback records bubble up to the parent flow so a single `rollback_on_failure` setting covers the whole tree.
 
+The inverse task's configured `options` are resolved for `${ns.path}` references as usual, then the `payload` is merged over them. A payload is runtime data the task recorded, not configuration, so it is passed through **literally** — a `${...}` captured inside one reaches the inverse task unchanged.
+
 ### `agent_prompt` — LLM step
 
 When a `LLMProvider` is attached to the context under `ctx.llm`, the built-in `agent_prompt` task invokes it:

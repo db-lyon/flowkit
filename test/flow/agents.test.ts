@@ -155,6 +155,46 @@ describe('FlowRunner agents', () => {
     expect(data.toolCalls[0]?.result.length).toBeGreaterThan(8000);
   });
 
+  it('resolves a task tool\'s configured defaults inside a sub-agent', async () => {
+    // The reference scope has to reach a task invoked as a tool however deep the
+    // agent nesting goes, or the same tool behaves differently by call site.
+    const provider: LLMProvider = {
+      async complete(req) {
+        const sys = req.system ?? '';
+        const state = provider as { _w?: number; _c?: number };
+        if (sys.includes('WORKER')) {
+          state._w = (state._w ?? 0) + 1;
+          return state._w === 1
+            ? { text: '', finishReason: 'tool_use', toolCalls: [{ id: '1', name: 'echo', arguments: { extra: '${project.name}' } }] }
+            : { text: 'worker-done', finishReason: 'stop' };
+        }
+        state._c = (state._c ?? 0) + 1;
+        return state._c === 1
+          ? { text: '', finishReason: 'tool_use', toolCalls: [{ id: '1', name: 'worker', arguments: { prompt: 's' } }] }
+          : { text: 'coord-done', finishReason: 'stop' };
+      },
+    };
+    const registry = new TaskRegistry().registerClassPath('vendor.tasks.Echo', EchoTask as never);
+    const r = new FlowRunner({
+      tasks: { echo: { class_path: 'vendor.tasks.Echo', options: { org: '${org.username}' } } } as never,
+      flows: { main: { steps: { 1: { task: 'coord', options: { prompt: 'go' } } } } } as never,
+      agents: {
+        coord: { system: 'COORD', tools: [{ agent: 'worker' }], budget: { tokenBudget: 100000 } },
+        worker: { system: 'WORKER', tools: [{ task: 'echo' }] },
+      } as never,
+      registry,
+      context: { llm: provider },
+      references: { org: { username: 'admin@example.com' } },
+    });
+    const res = await r.run({ flowName: 'main' });
+    expect(res.success).toBe(true);
+    const data = res.steps[0]?.result?.data as { toolCalls: Array<{ result: string }> };
+    // The sub-agent's tool result carries the echoed options: the configured
+    // default interpolated, the model's own argument left literal.
+    expect(data.toolCalls[0]?.result).toContain('admin@example.com');
+    expect(data.toolCalls[0]?.result).toContain('${project.name}');
+  });
+
   it('fails an agent that has agent tools but no budget', async () => {
     const r = runner(
       {

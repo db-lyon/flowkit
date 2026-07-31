@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { resolveReferences, type ReferenceableStep } from '../../src/flow/references.js';
+import { resolveReferences, type ReferenceableStep } from '../src/references.js';
 
 function step(
   stepNumber: number,

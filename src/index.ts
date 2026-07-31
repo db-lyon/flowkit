@@ -77,8 +77,9 @@ export type {
   HookError,
   RollbackResult,
 } from './flow/runner.js';
-export { resolveReferences } from './flow/references.js';
-export type { ReferenceableStep, ReferenceContext } from './flow/references.js';
+// References — shared by the task and flow layers
+export { resolveReferences } from './references.js';
+export type { ReferenceableStep, ReferenceContext } from './references.js';
 
 // DAG
 export {

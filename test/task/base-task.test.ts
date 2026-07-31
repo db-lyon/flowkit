@@ -50,12 +50,12 @@ class CallerTask extends BaseTask {
   }
 }
 
-class ResolveCallerTask extends BaseTask<{ target: string }> {
+class ResolveCallerTask extends BaseTask<{ target: string; args?: Record<string, unknown> }> {
   get taskName() {
     return 'resolve_caller';
   }
   async execute(): Promise<TaskResult> {
-    return this.call(this.options.target, { fromCall: 'call' });
+    return this.call(this.options.target, this.options.args ?? { fromCall: 'call' });
   }
 }
 
@@ -172,6 +172,37 @@ describe('BaseTask', () => {
     await expect(task.run()).resolves.toMatchObject({
       success: true,
       data: { ref: 'Flowkit', fromCall: 'call' },
+    });
+  });
+
+  it('leaves call-time options literal — they are runtime data, not config', async () => {
+    const registry = new TaskRegistry().registerClassPath('consumer.tasks.Child', ChildTask);
+    const task = new ResolveCallerTask({
+      registry,
+      taskDefinitions: {
+        configured_child: {
+          class_path: 'consumer.tasks.Child',
+          options: { ref: '${project.name}', fromDefault: 'default' },
+        },
+      },
+      taskReferenceContext: {
+        steps: [],
+        namespaces: { project: { name: 'Flowkit' } },
+      },
+    }, {
+      target: 'configured_child',
+      // A value this task computed. `${project.name}` is not interpolated, and
+      // `${steps.x}` does not throw for being outside a step scope.
+      args: { ref: '${project.name}', fromCall: '${steps.earlier.data.id}' },
+    });
+
+    await expect(task.run()).resolves.toMatchObject({
+      success: true,
+      data: {
+        fromDefault: 'default',
+        ref: '${project.name}',
+        fromCall: '${steps.earlier.data.id}',
+      },
     });
   });
 });
