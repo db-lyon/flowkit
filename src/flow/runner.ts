@@ -7,7 +7,7 @@ import type { TaskRegistry, TaskConstructor } from '../task/registry.js';
 import { AgentTask, type AgentTaskOptions } from '../task/agent-task.js';
 import type { TokenLedger } from '../task/token-ledger.js';
 import { resolveReferences, type ReferenceContext } from '../references.js';
-import { resolveTaskDefinition, resolveTaskCall } from '../task/task-resolution.js';
+import { resolveTaskDefinition, resolveTaskCall, type ResolvedTask } from '../task/task-resolution.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -314,26 +314,39 @@ export class FlowRunner {
     this.logger.info({ task: taskName }, `Running task ${taskName}`);
     // A direct invocation's `options` stand in for a step's configured options,
     // so they are interpolated here as a step's would be; `resolveTaskCall` then
-    // layers them over the (also interpolated) configured defaults.
+    // layers them over the (also interpolated) configured defaults. A bad
+    // reference is reported the way a step reports one, not thrown.
     const refs = this.baseReferences;
-    const resolved = resolveTaskCall(
-      taskName,
-      this.tasks,
-      resolveReferences(options, refs),
-      refs,
-    );
+    let resolved: ResolvedTask;
+    try {
+      resolved = resolveTaskCall(taskName, this.tasks, resolveReferences(options, refs), refs);
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err : new Error(String(err)) };
+    }
     return this.executeTask(resolved.classPath, resolved.options, refs);
   }
 
-  /** Instantiate and run a task with fully-resolved options (the shared leaf). */
+  /**
+   * Instantiate and run a task with fully-resolved options (the shared leaf).
+   *
+   * Never throws: a failure to load or construct the class is reported as a
+   * failed `TaskResult`, the same shape `BaseTask.run` guarantees for a failure
+   * inside the task. Every path into a task goes through here, so running one
+   * as a step, directly, as a tool, or during rollback all report failure
+   * identically — and a step's `retries` cover construction, not just execution.
+   */
   private async executeTask(
     classPath: string,
     options: Record<string, unknown>,
     references?: ReferenceContext,
   ): Promise<TaskResult> {
     const taskCtx = references ? this.contextFor(references) : this.ctx;
-    const task = await this.registry.create(classPath, taskCtx, options);
-    return task.run();
+    try {
+      const task = await this.registry.create(classPath, taskCtx, options);
+      return task.run();
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err : new Error(String(err)) };
+    }
   }
 
   private async runWith(

@@ -132,6 +132,22 @@ describe('FlowRunner.runTask', () => {
     expect(result.success).toBe(false);
     expect(result.error?.message).toBe('intentional');
   });
+
+  it('reports an unresolvable reference as a failed result, not a throw', async () => {
+    // A step converts a bad reference into { success: false }; a direct
+    // invocation is the same primitive and must report it the same way.
+    const runner = makeRunner({ rec: { class_path: 'test.Record', options: {} } }, {});
+    const result = await runner.runTask('rec', { label: '${steps.earlier.data.id}' });
+    expect(result.success).toBe(false);
+    expect(result.error?.message).toContain('Unresolvable step reference');
+  });
+
+  it('reports an unloadable class path as a failed result, not a throw', async () => {
+    const runner = makeRunner({ ghost: { class_path: 'test.NoSuchTask', options: {} } }, {});
+    const result = await runner.runTask('ghost');
+    expect(result.success).toBe(false);
+    expect(result.error).toBeInstanceOf(Error);
+  });
 });
 
 describe('FlowRunner', () => {
@@ -337,6 +353,46 @@ describe('FlowRunner', () => {
   it('throws on unknown flow name', async () => {
     const runner = makeRunner({}, {});
     await expect(runner.run({ flowName: 'nope' })).rejects.toThrow('not found');
+  });
+
+  it('fails the step, not the run, when a step\'s class cannot be loaded', async () => {
+    // Construction failure is reported like any other task failure, so the
+    // flow's own error handling (and `retries`) applies to it.
+    const log: string[] = [];
+    const runner = makeRunner(
+      {
+        ghost: { class_path: 'test.NoSuchTask', options: {} },
+        rec: { class_path: 'test.Record', options: {} },
+      },
+      {
+        test: {
+          description: 'Unloadable class',
+          steps: { '1': { task: 'ghost' }, '2': { task: 'rec', options: { label: 'after' } } },
+        },
+      },
+      { __log: log },
+    );
+    const result = await runner.run({ flowName: 'test' });
+    expect(result.success).toBe(false);
+    expect(result.steps).toHaveLength(1);
+    expect(result.steps[0]?.result?.success).toBe(false);
+    // Step 2 never ran: the failure stopped the flow rather than escaping it.
+    expect(log).toEqual([]);
+  });
+
+  it('retries a step whose class fails to load', async () => {
+    const runner = makeRunner(
+      { ghost: { class_path: 'test.NoSuchTask', options: {} } },
+      {
+        test: {
+          description: 'Retry construction',
+          steps: { '1': { task: 'ghost', retries: 2 } },
+        },
+      },
+    );
+    const result = await runner.run({ flowName: 'test' });
+    expect(result.success).toBe(false);
+    expect(result.steps[0]?.attempts).toBe(3);
   });
 
   it('allows class_path directly as task reference', async () => {
