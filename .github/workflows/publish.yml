@@ -19,7 +19,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           registry-url: https://registry.npmjs.org
 
       - name: Check if version changed
@@ -35,11 +35,13 @@ jobs:
             echo "changed=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Trusted publishing requires npm CLI 11.5.1+. The setup-node action
-      # ships an older npm with Node 20, so install a modern one explicitly.
+      # Trusted publishing requires npm CLI 11.5.1+, newer than the npm bundled
+      # with setup-node. Pinned to the 11 line on purpose: `npm@latest` moved to
+      # 12, which requires Node 22.22+/24.15+ and broke this job on the runner's
+      # Node. Widen the range only alongside the node-version above.
       - name: Upgrade npm for trusted publishing
         if: steps.version.outputs.changed == 'true'
-        run: npm install -g npm@latest
+        run: npm install -g "npm@^11.5.1"
 
       - run: npm ci
         if: steps.version.outputs.changed == 'true'
