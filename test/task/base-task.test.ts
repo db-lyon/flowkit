@@ -1,5 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { BaseTask, type TaskResult } from '../../src/task/base-task.js';
+import { TaskRegistry } from '../../src/task/registry.js';
 
 class SuccessTask extends BaseTask {
   get taskName() {
@@ -28,6 +29,24 @@ class ValidatingTask extends BaseTask<{ required: string }> {
   }
   async execute(): Promise<TaskResult> {
     return { success: true };
+  }
+}
+
+class ChildTask extends BaseTask<{ fromDefault?: string; fromCall?: string }> {
+  get taskName() {
+    return 'child';
+  }
+  async execute(): Promise<TaskResult> {
+    return { success: true, data: this.options };
+  }
+}
+
+class CallerTask extends BaseTask {
+  get taskName() {
+    return 'caller';
+  }
+  async execute(): Promise<TaskResult> {
+    return this.call('configured_child', { fromCall: 'call' });
   }
 }
 
@@ -78,5 +97,23 @@ describe('BaseTask', () => {
     await task.run();
     expect(messages.some((m) => m.includes('Starting task'))).toBe(true);
     expect(messages.some((m) => m.includes('Completed task'))).toBe(true);
+  });
+
+  it('resolves configured task names through class_path and merges default options', async () => {
+    const registry = new TaskRegistry().registerClassPath('consumer.tasks.Child', ChildTask);
+    const task = new CallerTask({
+      registry,
+      taskDefinitions: {
+        configured_child: {
+          class_path: 'consumer.tasks.Child',
+          options: { fromDefault: 'default', fromCall: 'default' },
+        },
+      },
+    }, {});
+
+    await expect(task.run()).resolves.toMatchObject({
+      success: true,
+      data: { fromDefault: 'default', fromCall: 'call' },
+    });
   });
 });

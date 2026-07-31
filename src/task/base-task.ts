@@ -81,9 +81,13 @@ export abstract class BaseTask<TOpts = Record<string, unknown>> {
   protected validate(): void {}
 
   /**
-   * Resolve another task by name from the registry.
-   * Returns an unexecuted task instance — call `.run()` on it yourself
-   * when you need to inspect or configure the task before running.
+   * Resolve another task by its configured name or class path from the registry.
+   *
+   * A FlowRunner supplies configured definitions on the context. Honor that
+   * indirection here too: task-to-task calls must use the same class_path and
+   * default options as an ordinary flow step or an agent tool.
+   * Returns an unexecuted task instance — call `.run()` on it yourself when you
+   * need to inspect or configure the task before running.
    */
   protected async resolve<T extends BaseTask = BaseTask>(
     taskName: string,
@@ -96,7 +100,12 @@ export abstract class BaseTask<TOpts = Record<string, unknown>> {
           'Tasks can only resolve other tasks when run via FlowRunner.',
       );
     }
-    return registry.create(taskName, this.ctx, options ?? {}) as Promise<T>;
+    const definition = this.ctx.taskDefinitions?.[taskName];
+    return registry.create(
+      definition?.class_path ?? taskName,
+      this.ctx,
+      { ...(definition?.options ?? {}), ...(options ?? {}) },
+    ) as Promise<T>;
   }
 
   /**
