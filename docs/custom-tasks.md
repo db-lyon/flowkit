@@ -61,8 +61,31 @@ export default class FetchData extends BaseTask<MyOptions> {
 | Property | Description |
 |----------|-------------|
 | `this.options` | The merged options (task defaults + step overrides), typed as `TOptions` |
-| `this.ctx` | The `TaskContext` passed to the flow runner — use it to share state |
+| `this.ctx` | The `TaskContext` passed to the flow runner — read-only, see below |
 | `this.logger` | A child logger scoped to this task instance |
+| `this.resolve(name, options?)` | Build another task by configured name or class path, unexecuted |
+| `this.call(name, options?)` | `resolve()` plus `run()`, returning its `TaskResult` |
+
+## Calling other tasks
+
+`this.call(name)` resolves `name` the same way a flow step does. A configured task name is looked up in the `tasks:` config and dispatched through its `class_path`, inheriting its configured `options` as defaults; anything you pass as `options` merges over them and wins. A name with no configured entry resolves as a class path directly, so a bare `vendor.tasks.Thing` still works.
+
+```yaml
+tasks:
+  soql_query:
+    class_path: caseops.tasks.SoqlQuery
+    options:
+      org: ${org.username}
+```
+
+```typescript
+// Runs caseops.tasks.SoqlQuery with { org: 'admin@example.com', query: 'SELECT ...' }
+const result = await this.call('soql_query', { query: 'SELECT Id FROM Case' });
+```
+
+The `${ns.path}` references in those configured defaults are interpolated for you, against the same scope the calling task itself runs under. The `options` you pass are your own runtime data and are **never** interpolated, so a `${...}` you computed reaches the task verbatim rather than being reinterpreted as configuration.
+
+Calling a task requires a registry on the context, which `FlowRunner` supplies. A task constructed by hand without one throws.
 
 ## The task lifecycle
 
@@ -90,7 +113,7 @@ Return `{ success: true }` for success and `{ success: false, error }` for expec
 
 ## TaskContext
 
-The context object is shared across all tasks in a flow run. Use it to pass shared state like database connections, API clients, or configuration:
+The context carries host-supplied state to every task in a flow run — database connections, API clients, configuration:
 
 ```typescript
 const runner = new FlowRunner({
@@ -110,6 +133,12 @@ async execute(): Promise<TaskResult> {
   const db = this.ctx.db as Database;
   // ...
 }
+```
+
+Treat the context as read-only. Each task is handed its own derived context, so assigning a key inside a task (`this.ctx.cached = x`) does not reach the next step, another task, or a sub-agent. To share mutable state, put a mutable object on the context up front and write into that:
+
+```typescript
+context: { cache: new Map() }   // this.ctx.cache.set(...) is visible everywhere
 ```
 
 ## Registering tasks

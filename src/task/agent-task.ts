@@ -350,13 +350,7 @@ export class AgentTask extends BaseTask<AgentTaskOptions> {
     try {
       let result: TaskResult;
       if (spec.task) {
-        // Layer the model's arguments over the task's configured defaults, and
-        // resolve via its class_path, so a task behaves the same as a tool as it
-        // does as a flow step. Falls back to the task name when run outside a
-        // FlowRunner (no taskDefinitions on the context).
-        const def = this.ctx.taskDefinitions?.[spec.task];
-        const classPath = def?.class_path ?? spec.task;
-        result = await this.call(classPath, { ...(def?.options ?? {}), ...args });
+        result = await this.call(spec.task, args);
       } else if (spec.flow) {
         if (!this.ctx.runFlow) {
           return fail(`Error: flow tools require a FlowRunner context (ctx.runFlow missing).`);

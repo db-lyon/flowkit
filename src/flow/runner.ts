@@ -6,7 +6,8 @@ import type { TaskContext } from '../task/base-task.js';
 import type { TaskRegistry, TaskConstructor } from '../task/registry.js';
 import { AgentTask, type AgentTaskOptions } from '../task/agent-task.js';
 import type { TokenLedger } from '../task/token-ledger.js';
-import { resolveReferences, type ReferenceContext } from './references.js';
+import { resolveReferences, type ReferenceContext } from '../references.js';
+import { resolveTaskDefinition, resolveTaskCall, type ResolvedTask } from '../task/task-resolution.js';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -159,6 +160,13 @@ export class FlowRunner {
   private references?: Record<string, unknown>;
   private agents: Record<string, AgentDefinition>;
   private runDepth = 0;
+  /**
+   * Reference scope outside any step: the host namespaces, no step results.
+   * Every task runs under at least this, so `${project.x}` in a configured
+   * default resolves the same whether the task runs as a step, as an agent
+   * tool, from another task, or during rollback.
+   */
+  private baseReferences: ReferenceContext;
 
   constructor(config: FlowRunnerConfig) {
     this.logger = (config.logger ?? noopLogger).child({ component: 'flow-runner' });
@@ -167,6 +175,7 @@ export class FlowRunner {
     this.hooks = config.hooks ?? {};
     this.conditionEvaluator = config.conditionEvaluator;
     this.references = config.references;
+    this.baseReferences = { steps: [], namespaces: this.references };
     this.agents = config.agents ?? {};
 
     // Compile each agent into a task definition so it is runnable as a flow
@@ -191,10 +200,30 @@ export class FlowRunner {
     // Expose the configured task definitions so tasks invoked as agent tools
     // inherit their class_path/options defaults (see AgentTask), and wire the
     // flow/agent tool dispatchers.
-    this.ctx = { ...config.context, registry: config.registry, taskDefinitions: this.tasks };
+    this.ctx = {
+      ...config.context,
+      registry: config.registry,
+      taskDefinitions: this.tasks,
+      taskReferenceContext: this.baseReferences,
+    };
     this.ctx.runFlow = (flowName, params) => this.runFlowTool(flowName, params);
     this.ctx.runAgent = (agentName, input, depth, ledger) =>
       this.runAgentTool(agentName, input, depth, ledger);
+  }
+
+  /**
+   * Context for work running under a given reference scope. The scope is
+   * propagated to nested tasks (`taskReferenceContext`) and forwarded through
+   * sub-agent dispatch, so a task invoked several agents deep resolves its
+   * configured defaults exactly as it would as a top-level step.
+   */
+  private contextFor(references: ReferenceContext): TaskContext {
+    return {
+      ...this.ctx,
+      taskReferenceContext: references,
+      runAgent: (agentName, input, depth, ledger) =>
+        this.runAgentTool(agentName, input, depth, ledger, references),
+    };
   }
 
   /** Map an agent definition onto AgentTask options (everything but the prompt). */
@@ -246,12 +275,28 @@ export class FlowRunner {
     input: Record<string, unknown>,
     depth: number,
     ledger?: TokenLedger,
+    references: ReferenceContext = this.baseReferences,
   ): Promise<TaskResult> {
     const def = this.agents[agentName];
     if (!def) return { success: false, error: new Error(`unknown agent "${agentName}"`) };
     const prompt = typeof input.prompt === 'string' ? input.prompt : JSON.stringify(input);
-    const options = { ...this.compileAgent(def), prompt };
-    const childCtx: TaskContext = { ...this.ctx, __agentDepth: depth, __tokenLedger: ledger };
+    // A compiled agent is configuration, so its `system` and friends interpolate
+    // here exactly as they do when the same agent runs as a flow step. The
+    // prompt is the caller's runtime input and stays literal.
+    let compiled: Omit<AgentTaskOptions, 'prompt'>;
+    try {
+      compiled = resolveReferences(this.compileAgent(def), references);
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err : new Error(String(err)) };
+    }
+    const options = { ...compiled, prompt };
+    // Carry the caller's reference scope down, so a task used as a tool inside
+    // the sub-agent interpolates its configured defaults like anywhere else.
+    const childCtx: TaskContext = {
+      ...this.contextFor(references),
+      __agentDepth: depth,
+      __tokenLedger: ledger,
+    };
     return new AgentTask(childCtx, options as AgentTaskOptions).run();
   }
 
@@ -266,20 +311,42 @@ export class FlowRunner {
    * on its own or as a step. `options` merge over the task's configured defaults.
    */
   async runTask(taskName: string, options: Record<string, unknown> = {}): Promise<TaskResult> {
-    const taskDef = this.resolveTaskDefinition(taskName);
     this.logger.info({ task: taskName }, `Running task ${taskName}`);
-    // Interpolate ${ns.path} references in option values (no prior steps here).
-    const merged = resolveReferences({ ...taskDef.options, ...options }, {
-      steps: [],
-      namespaces: this.references,
-    });
-    return this.executeTask(taskDef.class_path, merged);
+    // A direct invocation's `options` stand in for a step's configured options,
+    // so they are interpolated here as a step's would be; `resolveTaskCall` then
+    // layers them over the (also interpolated) configured defaults. A bad
+    // reference is reported the way a step reports one, not thrown.
+    const refs = this.baseReferences;
+    let resolved: ResolvedTask;
+    try {
+      resolved = resolveTaskCall(taskName, this.tasks, resolveReferences(options, refs), refs);
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err : new Error(String(err)) };
+    }
+    return this.executeTask(resolved.classPath, resolved.options, refs);
   }
 
-  /** Instantiate and run a task with fully-resolved options (the shared leaf). */
-  private async executeTask(classPath: string, options: Record<string, unknown>): Promise<TaskResult> {
-    const task = await this.registry.create(classPath, this.ctx, options);
-    return task.run();
+  /**
+   * Instantiate and run a task with fully-resolved options (the shared leaf).
+   *
+   * Never throws: a failure to load or construct the class is reported as a
+   * failed `TaskResult`, the same shape `BaseTask.run` guarantees for a failure
+   * inside the task. Every path into a task goes through here, so running one
+   * as a step, directly, as a tool, or during rollback all report failure
+   * identically — and a step's `retries` cover construction, not just execution.
+   */
+  private async executeTask(
+    classPath: string,
+    options: Record<string, unknown>,
+    references?: ReferenceContext,
+  ): Promise<TaskResult> {
+    const taskCtx = references ? this.contextFor(references) : this.ctx;
+    try {
+      const task = await this.registry.create(classPath, taskCtx, options);
+      return task.run();
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err : new Error(String(err)) };
+    }
   }
 
   private async runWith(
@@ -835,8 +902,9 @@ export class FlowRunner {
     parentOptions: ParentOptions,
     errorCtx?: { error: Error; step?: string },
   ): Promise<TaskResult> {
-    const taskDef = this.resolveTaskDefinition(step.name);
+    const taskDef = resolveTaskDefinition(step.name, this.tasks);
     // Precedence (low → high): task default → enclosing-flow override → step inline → runtime params.
+    // Every layer here is configuration, so the merge is interpolated as a whole.
     const rawOptions = {
       ...taskDef.options,
       ...(parentOptions[step.name] ?? {}),
@@ -872,7 +940,7 @@ export class FlowRunner {
       `Executing step ${step.stepNumber}: ${step.name}`,
     );
 
-    return this.executeTask(taskDef.class_path, mergedOptions);
+    return this.executeTask(taskDef.classPath, mergedOptions, refCtx);
   }
 
   private async performRollback(
@@ -884,8 +952,18 @@ export class FlowRunner {
       const rec = records[i]!;
       result.attempted++;
       try {
-        const taskDef = this.resolveTaskDefinition(rec.taskName);
-        const r = await this.executeTask(taskDef.class_path, { ...taskDef.options, ...rec.payload });
+        // A rollback payload is runtime data the task recorded, not
+        // configuration: `resolveTaskCall` interpolates the inverse task's
+        // configured defaults and merges the payload over them verbatim, so a
+        // `${...}` captured in recorded data is neither substituted nor thrown
+        // on — which the catch below would turn into a silently failed rollback.
+        const resolved = resolveTaskCall(
+          rec.taskName,
+          this.tasks,
+          rec.payload,
+          this.baseReferences,
+        );
+        const r = await this.executeTask(resolved.classPath, resolved.options);
         if (r.success) {
           result.succeeded++;
         } else {
@@ -903,19 +981,6 @@ export class FlowRunner {
     }
 
     return result;
-  }
-
-  private resolveTaskDefinition(taskName: string): {
-    class_path: string;
-    options: Record<string, unknown>;
-  } {
-    const taskDef = this.tasks[taskName];
-    if (taskDef) {
-      // An option-only entry (no class_path) layers options onto a base of the
-      // same name; absent a base class_path, resolve by the task name itself.
-      return { class_path: taskDef.class_path ?? taskName, options: taskDef.options ?? {} };
-    }
-    return { class_path: taskName, options: {} };
   }
 }
 

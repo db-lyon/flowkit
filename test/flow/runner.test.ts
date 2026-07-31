@@ -112,11 +112,41 @@ describe('FlowRunner.runTask', () => {
     expect(log).toEqual(['opt-only']);
   });
 
+  it('interpolates references in both the task defaults and the caller options', async () => {
+    const log: string[] = [];
+    const runner = new FlowRunner({
+      tasks: { rec: { class_path: 'test.Record', options: { label: '${project.name}' } } },
+      flows: {},
+      registry: createRegistry(),
+      context: { __log: log },
+      references: { project: { name: 'flowkit', tag: 'v1' } },
+    });
+    expect((await runner.runTask('rec')).data).toEqual({ label: 'flowkit' });
+    // A direct invocation's options stand in for a step's configured options.
+    expect((await runner.runTask('rec', { label: '${project.tag}' })).data).toEqual({ label: 'v1' });
+  });
+
   it('surfaces a task failure as a failed result', async () => {
     const runner = makeRunner({ boom: { class_path: 'test.Fail', options: {} } }, {});
     const result = await runner.runTask('boom');
     expect(result.success).toBe(false);
     expect(result.error?.message).toBe('intentional');
+  });
+
+  it('reports an unresolvable reference as a failed result, not a throw', async () => {
+    // A step converts a bad reference into { success: false }; a direct
+    // invocation is the same primitive and must report it the same way.
+    const runner = makeRunner({ rec: { class_path: 'test.Record', options: {} } }, {});
+    const result = await runner.runTask('rec', { label: '${steps.earlier.data.id}' });
+    expect(result.success).toBe(false);
+    expect(result.error?.message).toContain('Unresolvable step reference');
+  });
+
+  it('reports an unloadable class path as a failed result, not a throw', async () => {
+    const runner = makeRunner({ ghost: { class_path: 'test.NoSuchTask', options: {} } }, {});
+    const result = await runner.runTask('ghost');
+    expect(result.success).toBe(false);
+    expect(result.error).toBeInstanceOf(Error);
   });
 });
 
@@ -323,6 +353,46 @@ describe('FlowRunner', () => {
   it('throws on unknown flow name', async () => {
     const runner = makeRunner({}, {});
     await expect(runner.run({ flowName: 'nope' })).rejects.toThrow('not found');
+  });
+
+  it('fails the step, not the run, when a step\'s class cannot be loaded', async () => {
+    // Construction failure is reported like any other task failure, so the
+    // flow's own error handling (and `retries`) applies to it.
+    const log: string[] = [];
+    const runner = makeRunner(
+      {
+        ghost: { class_path: 'test.NoSuchTask', options: {} },
+        rec: { class_path: 'test.Record', options: {} },
+      },
+      {
+        test: {
+          description: 'Unloadable class',
+          steps: { '1': { task: 'ghost' }, '2': { task: 'rec', options: { label: 'after' } } },
+        },
+      },
+      { __log: log },
+    );
+    const result = await runner.run({ flowName: 'test' });
+    expect(result.success).toBe(false);
+    expect(result.steps).toHaveLength(1);
+    expect(result.steps[0]?.result?.success).toBe(false);
+    // Step 2 never ran: the failure stopped the flow rather than escaping it.
+    expect(log).toEqual([]);
+  });
+
+  it('retries a step whose class fails to load', async () => {
+    const runner = makeRunner(
+      { ghost: { class_path: 'test.NoSuchTask', options: {} } },
+      {
+        test: {
+          description: 'Retry construction',
+          steps: { '1': { task: 'ghost', retries: 2 } },
+        },
+      },
+    );
+    const result = await runner.run({ flowName: 'test' });
+    expect(result.success).toBe(false);
+    expect(result.steps[0]?.attempts).toBe(3);
   });
 
   it('allows class_path directly as task reference', async () => {
@@ -846,6 +916,153 @@ describe('FlowRunner — rollback on failure', () => {
     expect(result.rollback!.attempted).toBe(2);
     expect(result.rollback!.succeeded).toBe(1);
     expect(result.rollback!.errors).toHaveLength(1);
+  });
+
+  it('passes a rollback payload through literally, `${...}` and all', async () => {
+    // A payload is runtime data the task recorded. A `${steps....}` inside it is
+    // not a reference to resolve — and must not throw out of a step's scope,
+    // where performRollback's catch would bury it as a failed rollback.
+    const seen: Record<string, unknown>[] = [];
+    class CreateTask extends BaseTask {
+      get taskName() { return 'create'; }
+      async execute(): Promise<TaskResult> {
+        return {
+          success: true,
+          rollback: {
+            taskName: 'remove',
+            payload: {
+              whole: '${steps.create.data.id}',
+              embedded: 'restore ${steps.create.data.id} now',
+              nested: { list: ['${error.message}'] },
+            },
+          },
+        };
+      }
+    }
+    class RemoveTask extends BaseTask<Record<string, unknown>> {
+      get taskName() { return 'remove'; }
+      async execute(): Promise<TaskResult> {
+        seen.push(this.options);
+        return { success: true };
+      }
+    }
+    const registry = new TaskRegistry()
+      .registerClassPath('test.Create', CreateTask as unknown as TaskConstructor)
+      .registerClassPath('test.Remove', RemoveTask as unknown as TaskConstructor)
+      .registerClassPath('test.Fail', FailTask as unknown as TaskConstructor);
+    const runner = new FlowRunner({
+      tasks: {
+        create: { class_path: 'test.Create', options: {} },
+        remove: { class_path: 'test.Remove', options: {} },
+        fail: { class_path: 'test.Fail', options: {} },
+      },
+      flows: {
+        f: {
+          description: 'literal-payload',
+          rollback_on_failure: true,
+          steps: { '1': { task: 'create' }, '2': { task: 'fail' } },
+        },
+      },
+      registry,
+      context: {},
+    });
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(false);
+    expect(result.rollback).toEqual({ attempted: 1, succeeded: 1, errors: [] });
+    expect(seen).toEqual([
+      {
+        whole: '${steps.create.data.id}',
+        embedded: 'restore ${steps.create.data.id} now',
+        nested: { list: ['${error.message}'] },
+      },
+    ]);
+  });
+
+  it('interpolates the inverse task\'s configured defaults, with the payload winning', async () => {
+    const seen: Record<string, unknown>[] = [];
+    class CreateTask extends BaseTask {
+      get taskName() { return 'create'; }
+      async execute(): Promise<TaskResult> {
+        return {
+          success: true,
+          rollback: { taskName: 'remove', payload: { label: 'from-payload' } },
+        };
+      }
+    }
+    class RemoveTask extends BaseTask<Record<string, unknown>> {
+      get taskName() { return 'remove'; }
+      async execute(): Promise<TaskResult> {
+        seen.push(this.options);
+        return { success: true };
+      }
+    }
+    const registry = new TaskRegistry()
+      .registerClassPath('test.Create', CreateTask as unknown as TaskConstructor)
+      .registerClassPath('test.Remove', RemoveTask as unknown as TaskConstructor)
+      .registerClassPath('test.Fail', FailTask as unknown as TaskConstructor);
+    const runner = new FlowRunner({
+      tasks: {
+        create: { class_path: 'test.Create', options: {} },
+        // Configured defaults are configuration, so they still interpolate.
+        remove: { class_path: 'test.Remove', options: { org: '${org.username}', label: 'default' } },
+        fail: { class_path: 'test.Fail', options: {} },
+      },
+      flows: {
+        f: {
+          description: 'rollback-defaults',
+          rollback_on_failure: true,
+          steps: { '1': { task: 'create' }, '2': { task: 'fail' } },
+        },
+      },
+      registry,
+      context: {},
+      references: { org: { username: 'admin@example.com' } },
+    });
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(false);
+    expect(result.rollback).toEqual({ attempted: 1, succeeded: 1, errors: [] });
+    expect(seen).toEqual([{ org: 'admin@example.com', label: 'from-payload' }]);
+  });
+
+  it('resolves the rollback task through its configured class_path', async () => {
+    const seen: string[] = [];
+    class CreateTask extends BaseTask {
+      get taskName() { return 'create'; }
+      async execute(): Promise<TaskResult> {
+        // Records the configured alias, not the class path.
+        return { success: true, rollback: { taskName: 'remove_alias', payload: {} } };
+      }
+    }
+    class RemoveTask extends BaseTask<{ label?: string }> {
+      get taskName() { return 'remove'; }
+      async execute(): Promise<TaskResult> {
+        seen.push(this.options.label ?? 'none');
+        return { success: true };
+      }
+    }
+    const registry = new TaskRegistry()
+      .registerClassPath('test.Create', CreateTask as unknown as TaskConstructor)
+      .registerClassPath('vendor.tasks.Remove', RemoveTask as unknown as TaskConstructor)
+      .registerClassPath('test.Fail', FailTask as unknown as TaskConstructor);
+    const runner = new FlowRunner({
+      tasks: {
+        create: { class_path: 'test.Create', options: {} },
+        remove_alias: { class_path: 'vendor.tasks.Remove', options: { label: 'aliased' } },
+        fail: { class_path: 'test.Fail', options: {} },
+      },
+      flows: {
+        f: {
+          description: 'rollback-alias',
+          rollback_on_failure: true,
+          steps: { '1': { task: 'create' }, '2': { task: 'fail' } },
+        },
+      },
+      registry,
+      context: {},
+    });
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.rollback).toEqual({ attempted: 1, succeeded: 1, errors: [] });
+    expect(seen).toEqual(['aliased']);
   });
 
   it('does not roll back when rollback_on_failure is false', async () => {

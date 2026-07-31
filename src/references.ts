@@ -1,5 +1,7 @@
 /**
- * Reference resolution for flow option values.
+ * Reference resolution for configured option values. Shared infrastructure —
+ * the flow layer resolves step options with it, the task layer resolves a
+ * called task's configured defaults with it.
  *
  * Option values may contain `${<namespace>.<path>}` references:
  *

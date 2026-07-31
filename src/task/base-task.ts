@@ -4,7 +4,18 @@ import type { TaskRegistry } from './registry.js';
 import type { LLMProvider, LLMToolHandler } from './llm-provider.js';
 import type { TaskDefinition } from '../config/schema.js';
 import type { TokenLedger } from './token-ledger.js';
+import type { ReferenceContext } from '../references.js';
+import { resolveTaskCall } from './task-resolution.js';
 
+/**
+ * Ambient state handed to a task at construction.
+ *
+ * `FlowRunner` derives a fresh context per invocation so each task carries its
+ * own `taskReferenceContext` (see below). Treat it as **read-only**: writing a
+ * key onto `ctx` inside a task does not reach the next step, another task, or a
+ * sub-agent. Share state through a mutable object placed on the context by the
+ * host instead, e.g. `context: { cache: new Map() }`.
+ */
 export interface TaskContext {
   logger?: Logger;
   registry?: TaskRegistry;
@@ -17,6 +28,14 @@ export interface TaskContext {
    * as agent tools inherit their configured `class_path` and `options` defaults.
    */
   taskDefinitions?: Record<string, TaskDefinition>;
+  /**
+   * Reference scope for `${ns.path}` interpolation of a called task's
+   * *configured defaults*. Supplied by `FlowRunner` and propagated into nested
+   * tasks and sub-agents, so a task resolves the same references however deep
+   * it is invoked. Options passed at the call site are runtime data and are
+   * never interpolated.
+   */
+  taskReferenceContext?: ReferenceContext;
   /**
    * Run a configured flow as an agent tool. Wired by `FlowRunner`; absent when
    * a task runs outside one. Returns a task-shaped result whose `data.steps`
@@ -81,9 +100,16 @@ export abstract class BaseTask<TOpts = Record<string, unknown>> {
   protected validate(): void {}
 
   /**
-   * Resolve another task by name from the registry.
-   * Returns an unexecuted task instance — call `.run()` on it yourself
-   * when you need to inspect or configure the task before running.
+   * Resolve another task by its configured name or class path from the registry.
+   *
+   * A FlowRunner supplies configured definitions on the context. Honor that
+   * indirection here too: task-to-task calls must use the same class_path and
+   * default options as an ordinary flow step or an agent tool, including
+   * `${ns.path}` interpolation of those defaults. `options` are this task's own
+   * runtime data and stay literal (see `resolveTaskCall`).
+   *
+   * Returns an unexecuted task instance — call `.run()` on it yourself when you
+   * need to inspect or configure the task before running.
    */
   protected async resolve<T extends BaseTask = BaseTask>(
     taskName: string,
@@ -96,7 +122,13 @@ export abstract class BaseTask<TOpts = Record<string, unknown>> {
           'Tasks can only resolve other tasks when run via FlowRunner.',
       );
     }
-    return registry.create(taskName, this.ctx, options ?? {}) as Promise<T>;
+    const resolved = resolveTaskCall(
+      taskName,
+      this.ctx.taskDefinitions,
+      options,
+      this.ctx.taskReferenceContext,
+    );
+    return registry.create(resolved.classPath, this.ctx, resolved.options) as Promise<T>;
   }
 
   /**
