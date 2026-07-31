@@ -7,6 +7,15 @@ import type { TokenLedger } from './token-ledger.js';
 import type { ReferenceContext } from '../references.js';
 import { resolveTaskCall } from './task-resolution.js';
 
+/**
+ * Ambient state handed to a task at construction.
+ *
+ * `FlowRunner` derives a fresh context per invocation so each task carries its
+ * own `taskReferenceContext` (see below). Treat it as **read-only**: writing a
+ * key onto `ctx` inside a task does not reach the next step, another task, or a
+ * sub-agent. Share state through a mutable object placed on the context by the
+ * host instead, e.g. `context: { cache: new Map() }`.
+ */
 export interface TaskContext {
   logger?: Logger;
   registry?: TaskRegistry;

@@ -195,6 +195,51 @@ describe('FlowRunner agents', () => {
     expect(data.toolCalls[0]?.result).toContain('${project.name}');
   });
 
+  it('interpolates a sub-agent\'s own configured options, but not its prompt', async () => {
+    // An agent's compiled options are configuration wherever it is invoked from.
+    // Reaching it as a sub-agent tool must resolve `${...}` in its system prompt
+    // exactly as running it as a flow step does.
+    const systems: string[] = [];
+    const provider: LLMProvider = {
+      async complete(req) {
+        systems.push(req.system ?? '');
+        const state = provider as { _c?: number };
+        if ((req.system ?? '').includes('WORKER')) return { text: 'worker-done', finishReason: 'stop' };
+        state._c = (state._c ?? 0) + 1;
+        return state._c === 1
+          ? {
+              text: '',
+              finishReason: 'tool_use',
+              toolCalls: [{ id: '1', name: 'worker', arguments: { prompt: 'literal ${org.username}' } }],
+            }
+          : { text: 'coord-done', finishReason: 'stop' };
+      },
+    };
+    const r = new FlowRunner({
+      tasks: {} as never,
+      flows: { main: { steps: { 1: { task: 'coord', options: { prompt: 'go' } } } } } as never,
+      agents: {
+        coord: {
+          system: 'COORD for ${org.username}',
+          tools: [{ agent: 'worker' }],
+          budget: { tokenBudget: 100000 },
+        },
+        worker: { system: 'WORKER for ${org.username}' },
+      } as never,
+      registry: new TaskRegistry(),
+      context: { llm: provider },
+      references: { org: { username: 'admin@example.com' } },
+    });
+    const res = await r.run({ flowName: 'main' });
+    expect(res.success).toBe(true);
+    // Step-invoked and sub-agent-invoked resolve identically.
+    expect(systems[0]).toBe('COORD for admin@example.com');
+    expect(systems[1]).toBe('WORKER for admin@example.com');
+    // The caller's prompt is runtime input and stays literal.
+    const data = res.steps[0]?.result?.data as { toolCalls: Array<{ arguments: { prompt: string } }> };
+    expect(data.toolCalls[0]?.arguments.prompt).toBe('literal ${org.username}');
+  });
+
   it('fails an agent that has agent tools but no budget', async () => {
     const r = runner(
       {

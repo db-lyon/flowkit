@@ -280,7 +280,16 @@ export class FlowRunner {
     const def = this.agents[agentName];
     if (!def) return { success: false, error: new Error(`unknown agent "${agentName}"`) };
     const prompt = typeof input.prompt === 'string' ? input.prompt : JSON.stringify(input);
-    const options = { ...this.compileAgent(def), prompt };
+    // A compiled agent is configuration, so its `system` and friends interpolate
+    // here exactly as they do when the same agent runs as a flow step. The
+    // prompt is the caller's runtime input and stays literal.
+    let compiled: Omit<AgentTaskOptions, 'prompt'>;
+    try {
+      compiled = resolveReferences(this.compileAgent(def), references);
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err : new Error(String(err)) };
+    }
+    const options = { ...compiled, prompt };
     // Carry the caller's reference scope down, so a task used as a tool inside
     // the sub-agent interpolates its configured defaults like anywhere else.
     const childCtx: TaskContext = {
