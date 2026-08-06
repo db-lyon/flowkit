@@ -171,7 +171,8 @@ interface TaskResult {
 
 ### `ShellTask`
 
-Built-in task that executes shell commands via `execSync`.
+Built-in task that executes shell commands through the platform shell with
+streamed stdout and stderr.
 
 ```typescript
 class ShellTask extends BaseTask<ShellTaskOptions> {
@@ -188,10 +189,27 @@ class ShellTask extends BaseTask<ShellTaskOptions> {
 | `command` | `string` | (required) | Shell command to execute |
 | `cwd` | `string` | `undefined` | Working directory |
 | `timeout` | `number` | `300000` | Timeout in milliseconds (5 min) |
+| `signal` | `AbortSignal` | `undefined` | Cancels this individual programmatic invocation; not representable in YAML |
 
 **Success result:** `data.output` contains trimmed stdout.
 
 **Failure result:** `data.exitCode`, `data.stderr`, `data.stdout`.
+
+When `signal` is already aborted, no shell process is launched and the task
+returns the normal failed result with `Shell command cancelled`. An abort during
+execution requests termination of the spawned shell process. On Windows,
+Flowkit also makes a best-effort `taskkill /T /F` request for that invocation's
+shell PID before falling back to direct shell termination. On POSIX,
+signal-bearing invocations run in a dedicated process group, which Flowkit
+attempts to terminate as a group. Neither approach guarantees termination of descendants
+that have escaped the shell's process tree; callers must not treat the returned
+result as complete command-tree termination on Windows.
+
+For signal-bearing invocations, Flowkit waits for the spawned shell to close
+after requesting termination. If the operating system does not report closure
+within one second, it returns the cancellation or timeout result with the
+output captured so far; that bounded fallback is not confirmation that every
+process has exited.
 
 ---
 

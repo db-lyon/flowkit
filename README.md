@@ -163,6 +163,17 @@ import { ShellTask } from '@db-lyon/flowkit';
 registry.register('shell', ShellTask as any);
 ```
 
+Existing YAML consumers need no change. To cancel one programmatic invocation,
+pass an invocation-specific `AbortSignal`:
+
+```typescript
+const controller = new AbortController();
+const result = await new ShellTask({}, {
+  command: 'npm run build',
+  signal: controller.signal,
+}).run();
+```
+
 ### AI agents
 
 Run LLM calls as steps. Flowkit has **no SDK dependencies** — you wire a

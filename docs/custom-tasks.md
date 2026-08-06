@@ -187,7 +187,8 @@ The module must have either a `default` export or a named export matching the la
 
 ## Built-in: ShellTask
 
-`ShellTask` executes shell commands via `execSync`. Register it under any name you like:
+`ShellTask` executes shell commands through the platform shell and streams output.
+Register it under any name you like:
 
 ```typescript
 import { ShellTask } from '@db-lyon/flowkit';
@@ -221,8 +222,16 @@ tasks:
 | `command` | `string` | (required) | The shell command to execute |
 | `cwd` | `string` | `undefined` | Working directory |
 | `timeout` | `number` | `300000` (5 min) | Timeout in milliseconds |
+| `signal` | `AbortSignal` | `undefined` | Cancels one programmatic invocation; cannot be specified in YAML |
 
 On success, `result.data.output` contains the trimmed stdout. On failure, `result.data` includes `exitCode`, `stderr`, and `stdout`.
+
+Existing YAML consumers need no change. Programmatic callers that need
+cancellation pass an invocation-specific `AbortSignal` in the task options.
+After cancellation, Flowkit waits for the shell to close, with a one-second
+bounded fallback if the operating system does not report closure; that fallback
+does not guarantee all descendants have exited. On POSIX, signal-bearing
+invocations use a dedicated process group for a best-effort group-termination attempt.
 
 ## Listing registered tasks
 
