@@ -2,10 +2,10 @@ import { mkdtemp, rm, access, mkdir } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, vi } from 'vitest';
-import { SHELL_TASK_CANCELLED_MESSAGE as publicCancelledMessage } from '../../src/index.js';
-import { SHELL_TASK_CANCELLED_MESSAGE as taskPublicCancelledMessage } from '../../src/task/index.js';
-import { SHELL_TASK_CANCELLED_MESSAGE, ShellTask } from '../../src/task/shell-task.js';
+import { ShellTask } from '../../src/task/shell-task.js';
 import type { Logger } from '../../src/logger.js';
+
+const SHELL_TASK_CANCELLED_MESSAGE = 'Shell command cancelled';
 
 interface CapturedLog {
   level: 'debug' | 'info' | 'warn' | 'error';
@@ -122,11 +122,6 @@ describe('ShellTask', () => {
     expect((result.data as { output: string }).output).toBe('partial');
   });
 
-  it('exports the stable cancellation message from the public entrypoint', () => {
-    expect(publicCancelledMessage).toBe(SHELL_TASK_CANCELLED_MESSAGE);
-    expect(taskPublicCancelledMessage).toBe(SHELL_TASK_CANCELLED_MESSAGE);
-  });
-
   it('does not launch a command when its signal is already aborted', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'flowkit-shell-'));
     const marker = join(dir, 'launched');
@@ -191,6 +186,43 @@ describe('ShellTask', () => {
       await rm(dir, { recursive: true, force: true });
     }
   });
+
+  it.runIf(process.platform !== 'win32')(
+    'escalates a SIGTERM-resistant process group before delayed work runs',
+    async () => {
+      const dir = await mkdtemp(join(tmpdir(), 'flowkit-shell-'));
+      const marker = join(dir, 'survived');
+      const controller = new AbortController();
+      const { logger } = makeCapturingLogger();
+      let signalStarted: () => void;
+      const started = new Promise<void>((resolve) => {
+        signalStarted = resolve;
+      });
+      const originalInfo = logger.info;
+      logger.info = (...args) => {
+        originalInfo(...args);
+        if (args[1] === 'started') signalStarted();
+      };
+
+      try {
+        const resultPromise = new ShellTask({ logger }, {
+          command: nodeCommand(
+            `process.on('SIGTERM', () => {}); process.stdout.write('started\\n'); setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(marker)}, 'yes'), 800)`,
+          ),
+          signal: controller.signal,
+        }).run();
+        await started;
+        controller.abort();
+
+        const result = await resultPromise;
+        expect(result.error?.message).toBe(SHELL_TASK_CANCELLED_MESSAGE);
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+        await expect(access(marker)).rejects.toThrow();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('removes the registered abort listener exactly once after normal completion', async () => {
     const controller = new AbortController();

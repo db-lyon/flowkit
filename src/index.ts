@@ -26,7 +26,7 @@ export type { LoadConfigOptions, LoadedConfig } from './config/loader.js';
 // Task
 export { BaseTask } from './task/base-task.js';
 export type { TaskContext, TaskResult, RollbackRecord } from './task/base-task.js';
-export { ShellTask, SHELL_TASK_CANCELLED_MESSAGE } from './task/shell-task.js';
+export { ShellTask } from './task/shell-task.js';
 export type { ShellTaskOptions } from './task/shell-task.js';
 export { TaskRegistry } from './task/registry.js';
 export type { TaskConstructor } from './task/registry.js';

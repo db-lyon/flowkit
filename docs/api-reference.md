@@ -200,17 +200,21 @@ returns the normal failed result with `Shell command cancelled`. An abort during
 execution requests termination of the spawned shell process. On Windows,
 Flowkit makes a best-effort `taskkill /T /F` request for that invocation's
 shell PID and falls back to direct shell termination only if that request
-fails. On POSIX,
-signal-bearing invocations run in a dedicated process group, which Flowkit
-attempts to terminate as a group. Neither approach guarantees termination of descendants
-that have escaped the shell's process tree; callers must not treat the returned
-result as complete command-tree termination on Windows.
+fails or the three-second terminal deadline expires. On POSIX,
+signal-bearing invocations run in a dedicated process group. Flowkit requests
+`SIGTERM`, allows 250ms for cooperative cleanup, and then escalates the group
+to `SIGKILL`. Neither approach guarantees termination of descendants that have
+escaped the managed process tree or group; callers must not treat the returned
+result as proof of complete descendant termination.
 
 For signal-bearing invocations, Flowkit waits for the spawned shell to close
 after requesting termination. If the operating system does not report closure
 within one second on POSIX or three seconds on Windows, it returns the
 cancellation or timeout result with the output captured so far; that bounded
-fallback is not confirmation that every process has exited. POSIX
+fallback requests force termination and releases Flowkit's Node handles for
+the root shell and any Windows `taskkill` helper, but is not confirmation that
+either process, or any escaped descendant, has
+exited. POSIX
 signal-bearing invocations are in a separate process group, so terminal Ctrl+C
 does not reach them automatically; cancel through the supplied `AbortSignal`.
 

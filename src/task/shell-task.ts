@@ -1,5 +1,11 @@
 import { spawn } from 'node:child_process';
 import { BaseTask, type TaskResult } from './base-task.js';
+import {
+  beginShellTermination,
+  POSIX_SIGTERM_GRACE_MS,
+  terminationGraceMs,
+  type ShellTerminationHandle,
+} from './shell-termination.js';
 
 export interface ShellTaskOptions {
   command: string;
@@ -9,21 +15,13 @@ export interface ShellTaskOptions {
   signal?: AbortSignal;
 }
 
-/** Stable error text returned when a shell invocation is cancelled. */
-export const SHELL_TASK_CANCELLED_MESSAGE = 'Shell command cancelled';
-
-// A killed child should emit `close`; this only bounds a pathological case
-// where the operating system never reports that closure.
-const TERMINATION_GRACE_MS = process.platform === 'win32' ? 3_000 : 1_000;
+/** Stable internal error text returned when a shell invocation is cancelled. */
+const SHELL_TASK_CANCELLED_MESSAGE = 'Shell command cancelled';
 
 function isAbortSignal(value: unknown): value is AbortSignal {
-  return Boolean(
-    value &&
-      typeof value === 'object' &&
-      typeof (value as AbortSignal).aborted === 'boolean' &&
-      typeof (value as AbortSignal).addEventListener === 'function' &&
-      typeof (value as AbortSignal).removeEventListener === 'function',
-  );
+  // A structural check can admit a lookalike whose addEventListener throws
+  // after spawn, recreating the detached-child leak this validation prevents.
+  return value instanceof AbortSignal;
 }
 
 /**
@@ -98,6 +96,12 @@ export class ShellTask extends BaseTask<ShellTaskOptions> {
       let abortListenerRegistered = false;
       let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
       let terminationTimer: ReturnType<typeof setTimeout> | undefined;
+      let escalationTimer: ReturnType<typeof setTimeout> | undefined;
+      let terminator: ShellTerminationHandle | undefined;
+      let terminationEscalated = false;
+      let pendingTerminalClose:
+        | { exitCode: number | null; exitSignal: NodeJS.Signals | null }
+        | undefined;
       const onStdoutData = (chunk: string) => {
         stdoutBuf += chunk;
         emitLines(chunk, 'stdout', (line) => {
@@ -155,12 +159,14 @@ export class ShellTask extends BaseTask<ShellTaskOptions> {
       const cleanup = () => {
         if (timeoutTimer) clearTimeout(timeoutTimer);
         if (terminationTimer) clearTimeout(terminationTimer);
+        if (escalationTimer) clearTimeout(escalationTimer);
         removeAbortListener();
         // A bounded fallback may settle before a misbehaving child closes.
         // Stop capturing output then, while retaining the child error handler
         // until Node finishes closing it.
         child.stdout?.removeListener('data', onStdoutData);
         child.stderr?.removeListener('data', onStderrData);
+        terminator?.dispose();
       };
 
       const resultData = (
@@ -182,61 +188,6 @@ export class ShellTask extends BaseTask<ShellTaskOptions> {
         settled = true;
         cleanup();
         resolve(result);
-      };
-
-      const terminateChild = () => {
-        if (child.killed) return;
-        const killDirectly = () => {
-          if (child.killed) return;
-          try {
-            child.kill('SIGKILL');
-          } catch {
-            // A close/kill race is represented by the pending terminal result
-            // or its bounded fallback.
-          }
-        };
-        if (process.platform === 'win32' && child.pid !== undefined) {
-          // `child.kill()` terminates cmd.exe, but does not reliably terminate
-          // commands it has already launched. taskkill's /T is a best-effort
-          // tree termination request for this invocation only. It is not a
-          // guarantee for descendants that have escaped the process tree.
-          try {
-            const killer = spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], {
-              stdio: 'ignore',
-              windowsHide: true,
-            });
-            // Do not kill cmd.exe while taskkill is walking its tree: doing so
-            // can orphan descendants before /T reaches them. Fall back only
-            // when taskkill itself reports a failure.
-            const killOnFailure = () => {
-              if (settled) return;
-              killDirectly();
-            };
-            killer.once('error', killOnFailure);
-            killer.once('close', (code) => {
-              if (settled) return;
-              if (code === 0) {
-                return;
-              }
-              killOnFailure();
-            });
-          } catch {
-            // The direct kill below is still required when taskkill cannot be
-            // launched synchronously.
-            killDirectly();
-          }
-          return;
-        }
-        if (signal && child.pid !== undefined) {
-          try {
-            process.kill(-child.pid, 'SIGKILL');
-            return;
-          } catch {
-            // The shell may already have exited or the platform may reject a
-            // process-group signal. Kill the direct child as a safe fallback.
-          }
-        }
-        killDirectly();
       };
 
       const settleTerminal = (exitCode: number | null, exitSignal: NodeJS.Signals | null) => {
@@ -270,9 +221,29 @@ export class ShellTask extends BaseTask<ShellTaskOptions> {
           }
           return;
         }
-        terminationTimer = setTimeout(() => settleTerminal(null, null), TERMINATION_GRACE_MS);
         try {
-          terminateChild();
+          terminator = beginShellTermination(child);
+          terminator.onTreeKillComplete(() => {
+            if (!pendingTerminalClose || settled || terminalCause === 'running') return;
+            const pending = pendingTerminalClose;
+            pendingTerminalClose = undefined;
+            settleTerminal(pending.exitCode, pending.exitSignal);
+          });
+          if (terminator.platform !== 'win32') {
+            escalationTimer = setTimeout(() => {
+              terminationEscalated = true;
+              terminator?.escalate();
+              if (pendingTerminalClose) {
+                const pending = pendingTerminalClose;
+                pendingTerminalClose = undefined;
+                settleTerminal(pending.exitCode, pending.exitSignal);
+              }
+            }, POSIX_SIGTERM_GRACE_MS);
+          }
+          terminationTimer = setTimeout(() => {
+            terminator?.release();
+            settleTerminal(null, null);
+          }, terminationGraceMs(terminator.platform));
         } catch {
           // `close` or the bounded fallback below will settle the terminal
           // result; a kill race must not escape as an unhandled exception.
@@ -311,6 +282,19 @@ export class ShellTask extends BaseTask<ShellTaskOptions> {
       child.on('close', (code, exitSignal) => {
         if (settled) return;
         if (terminalCause !== 'running') {
+          const waitsForPosixEscalation =
+            terminator !== undefined &&
+            terminator.platform !== 'win32' &&
+            !terminationEscalated;
+          const waitsForWindowsTree =
+            terminator?.platform === 'win32' && !terminator.isTreeKillComplete();
+          if (waitsForPosixEscalation || waitsForWindowsTree) {
+            // A root shell may close before its descendants are finished.
+            // Keep the POSIX escalation or Windows taskkill operation owned
+            // until it finishes or reaches the bounded terminal deadline.
+            pendingTerminalClose = { exitCode: code, exitSignal };
+            return;
+          }
           settleTerminal(code, exitSignal);
           return;
         }

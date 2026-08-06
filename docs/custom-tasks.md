@@ -231,9 +231,20 @@ cancellation pass an invocation-specific `AbortSignal` in the task options.
 After cancellation, Flowkit waits for the shell to close, with a bounded
 fallback if the operating system does not report closure (one second on POSIX,
 three seconds on Windows). That fallback does not guarantee all descendants
-have exited. On POSIX, signal-bearing invocations use a dedicated process group
-for a best-effort group-termination attempt; terminal Ctrl+C is not delivered
-to that separate group, so use the supplied `AbortSignal` for cancellation.
+have exited. At the deadline Flowkit requests force termination and releases
+its Node handles for the root shell and any Windows `taskkill` helper before
+returning. On POSIX,
+signal-bearing invocations use a dedicated process group: Flowkit requests
+`SIGTERM`, waits 250ms for cooperative cleanup, then escalates the group to
+`SIGKILL`. Terminal Ctrl+C is not delivered to that separate group, so use the
+supplied `AbortSignal` for cancellation.
+
+On Windows, Flowkit asks `taskkill /T /F` to terminate the shell tree and does
+not kill the shell while that traversal is in progress. If `taskkill` fails or
+the three-second deadline expires, Flowkit requests force termination and
+releases its Node handles for the root and helper. Windows and POSIX descendants that escape the managed process
+tree or process group may still survive; Node does not provide a portable
+guarantee of complete descendant termination.
 
 Trailing stdout and stderr fragments are captured once, including when no
 `signal` is supplied. This corrects the duplicate final-partial-line output in
