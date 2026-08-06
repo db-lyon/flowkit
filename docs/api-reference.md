@@ -171,7 +171,8 @@ interface TaskResult {
 
 ### `ShellTask`
 
-Built-in task that executes shell commands via `execSync`.
+Built-in task that executes shell commands through the platform shell with
+streamed stdout and stderr.
 
 ```typescript
 class ShellTask extends BaseTask<ShellTaskOptions> {
@@ -188,10 +189,37 @@ class ShellTask extends BaseTask<ShellTaskOptions> {
 | `command` | `string` | (required) | Shell command to execute |
 | `cwd` | `string` | `undefined` | Working directory |
 | `timeout` | `number` | `300000` | Timeout in milliseconds (5 min) |
+| `signal` | `AbortSignal` | `undefined` | Cancels this individual programmatic invocation; not representable in YAML |
 
 **Success result:** `data.output` contains trimmed stdout.
 
 **Failure result:** `data.exitCode`, `data.stderr`, `data.stdout`.
+
+When `signal` is already aborted, no shell process is launched and the task
+returns the normal failed result with `Shell command cancelled`. An abort during
+execution requests termination of the spawned shell process. On Windows,
+Flowkit makes a best-effort `taskkill /T /F` request for that invocation's
+shell PID and falls back to direct shell termination only if that request
+fails or the three-second terminal deadline expires. On POSIX,
+signal-bearing invocations run in a dedicated process group. Flowkit requests
+`SIGTERM`, allows 250ms for cooperative cleanup, and then escalates the group
+to `SIGKILL`. Neither approach guarantees termination of descendants that have
+escaped the managed process tree or group; callers must not treat the returned
+result as proof of complete descendant termination.
+
+For signal-bearing invocations, Flowkit waits for the spawned shell to close
+after requesting termination. If the operating system does not report closure
+within one second on POSIX or three seconds on Windows, it returns the
+cancellation or timeout result with the output captured so far; that bounded
+fallback requests force termination and releases Flowkit's Node handles for
+the root shell and any Windows `taskkill` helper, but is not confirmation that
+either process, or any escaped descendant, has
+exited. POSIX
+signal-bearing invocations are in a separate process group, so terminal Ctrl+C
+does not reach them automatically; cancel through the supplied `AbortSignal`.
+
+Trailing stdout and stderr fragments are captured once. This corrects the
+duplicate final-partial-line output in earlier releases.
 
 ---
 

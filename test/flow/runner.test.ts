@@ -37,6 +37,15 @@ class RecordTask extends BaseTask<{ label?: string }> {
   }
 }
 
+class SignalTask extends BaseTask<{ signal: AbortSignal }> {
+  get taskName() {
+    return 'signal';
+  }
+  async execute(): Promise<TaskResult> {
+    return { success: true, data: { signal: this.options.signal } };
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -45,7 +54,8 @@ function createRegistry(): TaskRegistry {
   return new TaskRegistry()
     .registerClassPath('test.Pass', PassTask as unknown as TaskConstructor)
     .registerClassPath('test.Fail', FailTask as unknown as TaskConstructor)
-    .registerClassPath('test.Record', RecordTask as unknown as TaskConstructor);
+    .registerClassPath('test.Record', RecordTask as unknown as TaskConstructor)
+    .registerClassPath('test.Signal', SignalTask as unknown as TaskConstructor);
 }
 
 function makeRunner(
@@ -124,6 +134,16 @@ describe('FlowRunner.runTask', () => {
     expect((await runner.runTask('rec')).data).toEqual({ label: 'flowkit' });
     // A direct invocation's options stand in for a step's configured options.
     expect((await runner.runTask('rec', { label: '${project.tag}' })).data).toEqual({ label: 'v1' });
+  });
+
+  it('preserves an AbortSignal passed through runTask options', async () => {
+    const controller = new AbortController();
+    const runner = makeRunner({ signal: { class_path: 'test.Signal', options: {} } }, {});
+
+    const result = await runner.runTask('signal', { signal: controller.signal });
+
+    expect(result.success).toBe(true);
+    expect((result.data as { signal: AbortSignal }).signal).toBe(controller.signal);
   });
 
   it('surfaces a task failure as a failed result', async () => {

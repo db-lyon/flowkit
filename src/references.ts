@@ -46,6 +46,11 @@ export function resolveReferences<T>(value: T, ctx: ReferenceContext): T {
     return value.map((v) => resolveReferences(v, ctx)) as unknown as T;
   }
   if (typeof value === 'object') {
+    // Configuration is represented by plain objects. Preserve runtime values
+    // (AbortSignal, Date, class instances, etc.) by identity: recursively
+    // copying them can discard non-enumerable state and methods.
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return value;
     const out: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(value as Record<string, unknown>)) {
       out[k] = resolveReferences(v, ctx);
