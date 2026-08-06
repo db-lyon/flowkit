@@ -3,6 +3,7 @@ name: Test
 on:
   pull_request:
   push:
+    branches: [main]
 
 permissions:
   contents: read
@@ -22,6 +23,9 @@ jobs:
         with:
           node-version: 22
           cache: npm
+
+      - name: Align npm with publish workflow
+        run: npm install -g "npm@^11.5.1"
 
       - run: npm ci
       - run: npm run test:package-api

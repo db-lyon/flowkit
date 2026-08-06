@@ -228,10 +228,16 @@ On success, `result.data.output` contains the trimmed stdout. On failure, `resul
 
 Existing YAML consumers need no change. Programmatic callers that need
 cancellation pass an invocation-specific `AbortSignal` in the task options.
-After cancellation, Flowkit waits for the shell to close, with a one-second
-bounded fallback if the operating system does not report closure; that fallback
-does not guarantee all descendants have exited. On POSIX, signal-bearing
-invocations use a dedicated process group for a best-effort group-termination attempt.
+After cancellation, Flowkit waits for the shell to close, with a bounded
+fallback if the operating system does not report closure (one second on POSIX,
+three seconds on Windows). That fallback does not guarantee all descendants
+have exited. On POSIX, signal-bearing invocations use a dedicated process group
+for a best-effort group-termination attempt; terminal Ctrl+C is not delivered
+to that separate group, so use the supplied `AbortSignal` for cancellation.
+
+Trailing stdout and stderr fragments are captured once, including when no
+`signal` is supplied. This corrects the duplicate final-partial-line output in
+earlier releases.
 
 ## Listing registered tasks
 

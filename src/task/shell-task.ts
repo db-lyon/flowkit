@@ -14,8 +14,17 @@ export const SHELL_TASK_CANCELLED_MESSAGE = 'Shell command cancelled';
 
 // A killed child should emit `close`; this only bounds a pathological case
 // where the operating system never reports that closure.
-const TERMINATION_GRACE_MS = 1_000;
-const WINDOWS_TASKKILL_GRACE_MS = 50;
+const TERMINATION_GRACE_MS = process.platform === 'win32' ? 3_000 : 1_000;
+
+function isAbortSignal(value: unknown): value is AbortSignal {
+  return Boolean(
+    value &&
+      typeof value === 'object' &&
+      typeof (value as AbortSignal).aborted === 'boolean' &&
+      typeof (value as AbortSignal).addEventListener === 'function' &&
+      typeof (value as AbortSignal).removeEventListener === 'function',
+  );
+}
 
 /**
  * Task that executes a shell command.
@@ -47,6 +56,9 @@ export class ShellTask extends BaseTask<ShellTaskOptions> {
   protected validate(): void {
     if (!this.options.command || typeof this.options.command !== 'string') {
       throw new Error('ShellTask requires a "command" option');
+    }
+    if (this.options.signal !== undefined && !isAbortSignal(this.options.signal)) {
+      throw new Error('ShellTask "signal" must be an AbortSignal');
     }
   }
 
@@ -86,7 +98,18 @@ export class ShellTask extends BaseTask<ShellTaskOptions> {
       let abortListenerRegistered = false;
       let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
       let terminationTimer: ReturnType<typeof setTimeout> | undefined;
-      let directKillTimer: ReturnType<typeof setTimeout> | undefined;
+      const onStdoutData = (chunk: string) => {
+        stdoutBuf += chunk;
+        emitLines(chunk, 'stdout', (line) => {
+          this.logger.info({ stream: 'stdout' }, line);
+        });
+      };
+      const onStderrData = (chunk: string) => {
+        stderrBuf += chunk;
+        emitLines(chunk, 'stderr', (line) => {
+          this.logger.warn({ stream: 'stderr' }, line);
+        });
+      };
 
       const emitLines = (
         chunk: string,
@@ -109,31 +132,16 @@ export class ShellTask extends BaseTask<ShellTaskOptions> {
       child.stdout?.setEncoding('utf-8');
       child.stderr?.setEncoding('utf-8');
 
-      child.stdout?.on('data', (chunk: string) => {
-        stdoutBuf += chunk;
-        emitLines(chunk, 'stdout', (line) => {
-          this.logger.info({ stream: 'stdout' }, line);
-        });
-      });
-
-      child.stderr?.on('data', (chunk: string) => {
-        stderrBuf += chunk;
-        emitLines(chunk, 'stderr', (line) => {
-          this.logger.warn({ stream: 'stderr' }, line);
-        });
-      });
+      child.stdout?.on('data', onStdoutData);
+      child.stderr?.on('data', onStderrData);
 
       const flushTails = () => {
         if (stdoutTail.length > 0) {
           this.logger.info({ stream: 'stdout' }, stdoutTail);
-          // Keep the existing no-signal result behavior: captured partial
-          // lines are represented both when read and when flushed at close.
-          if (!signal) stdoutBuf += stdoutTail;
           stdoutTail = '';
         }
         if (stderrTail.length > 0) {
           this.logger.warn({ stream: 'stderr' }, stderrTail);
-          if (!signal) stderrBuf += stderrTail;
           stderrTail = '';
         }
       };
@@ -147,8 +155,12 @@ export class ShellTask extends BaseTask<ShellTaskOptions> {
       const cleanup = () => {
         if (timeoutTimer) clearTimeout(timeoutTimer);
         if (terminationTimer) clearTimeout(terminationTimer);
-        if (directKillTimer) clearTimeout(directKillTimer);
         removeAbortListener();
+        // A bounded fallback may settle before a misbehaving child closes.
+        // Stop capturing output then, while retaining the child error handler
+        // until Node finishes closing it.
+        child.stdout?.removeListener('data', onStdoutData);
+        child.stderr?.removeListener('data', onStderrData);
       };
 
       const resultData = (
@@ -193,24 +205,21 @@ export class ShellTask extends BaseTask<ShellTaskOptions> {
               stdio: 'ignore',
               windowsHide: true,
             });
-            // Give taskkill a short opportunity to locate and terminate the
-            // shell's tree. Any failure, non-zero exit, or short watchdog
-            // expiry falls back to direct shell termination.
+            // Do not kill cmd.exe while taskkill is walking its tree: doing so
+            // can orphan descendants before /T reaches them. Fall back only
+            // when taskkill itself reports a failure.
             const killOnFailure = () => {
               if (settled) return;
-              if (directKillTimer) clearTimeout(directKillTimer);
               killDirectly();
             };
             killer.once('error', killOnFailure);
             killer.once('close', (code) => {
               if (settled) return;
               if (code === 0) {
-                if (directKillTimer) clearTimeout(directKillTimer);
                 return;
               }
               killOnFailure();
             });
-            directKillTimer = setTimeout(killDirectly, WINDOWS_TASKKILL_GRACE_MS);
           } catch {
             // The direct kill below is still required when taskkill cannot be
             // launched synchronously.
@@ -276,7 +285,6 @@ export class ShellTask extends BaseTask<ShellTaskOptions> {
 
       signal?.addEventListener('abort', onAbort, { once: true });
       abortListenerRegistered = Boolean(signal);
-      if (signal?.aborted) onAbort();
 
       child.on('error', (err) => {
         if (terminalCause !== 'running') {
@@ -300,13 +308,13 @@ export class ShellTask extends BaseTask<ShellTaskOptions> {
         });
       });
 
-      child.on('close', (code, signal) => {
+      child.on('close', (code, exitSignal) => {
         if (settled) return;
         if (terminalCause !== 'running') {
-          settleTerminal(code, signal);
+          settleTerminal(code, exitSignal);
           return;
         }
-        const data = resultData(code, signal);
+        const data = resultData(code, exitSignal);
         if (code === 0) {
           settle({ success: true, data: { output: data.stdout } });
           return;

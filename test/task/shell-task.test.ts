@@ -102,15 +102,15 @@ describe('ShellTask', () => {
     expect((result.data as { exitCode: number }).exitCode).toBe(1);
   });
 
-  it('preserves no-signal output behavior for a final partial line', async () => {
+  it('captures a final partial line once without a signal', async () => {
     const task = new ShellTask({}, { command: nodeCommand("process.stdout.write('partial')") });
     const result = await task.run();
 
     expect(result.success).toBe(true);
-    expect((result.data as { output: string }).output).toBe('partialpartial');
+    expect((result.data as { output: string }).output).toBe('partial');
   });
 
-  it('does not duplicate a final partial line when a signal is supplied', async () => {
+  it('captures a final partial line once when a signal is supplied', async () => {
     const controller = new AbortController();
     const task = new ShellTask({}, {
       command: nodeCommand("process.stdout.write('partial')"),
@@ -148,9 +148,7 @@ describe('ShellTask', () => {
     }
   });
 
-  it.runIf(process.platform !== 'win32')(
-    'cancels a running command after it closes and prevents delayed work',
-    async () => {
+  it('cancels a running command after it closes and prevents delayed work', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'flowkit-shell-'));
     const marker = join(dir, 'finished');
     const controller = new AbortController();
@@ -192,8 +190,7 @@ describe('ShellTask', () => {
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
-    },
-  );
+  });
 
   it('removes the registered abort listener exactly once after normal completion', async () => {
     const controller = new AbortController();

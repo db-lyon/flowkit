@@ -15,6 +15,16 @@ const ctx = (steps: ReferenceableStep[], error?: Parameters<typeof resolveRefere
 });
 
 describe('resolveReferences — host namespaces', () => {
+  it('preserves non-plain runtime objects by identity', () => {
+    const controller = new AbortController();
+    const value = { signal: controller.signal, startedAt: new Date() };
+
+    const resolved = resolveReferences(value, ctx([]));
+
+    expect(resolved.signal).toBe(controller.signal);
+    expect(resolved.startedAt).toBe(value.startedAt);
+  });
+
   const ns = { project: { package: { namespace: 'acme' } }, org: { username: 'a@b.com' }, env: { HOME: '/h' } };
 
   it('whole-value reference yields the raw typed value', () => {

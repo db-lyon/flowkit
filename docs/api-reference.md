@@ -198,8 +198,9 @@ class ShellTask extends BaseTask<ShellTaskOptions> {
 When `signal` is already aborted, no shell process is launched and the task
 returns the normal failed result with `Shell command cancelled`. An abort during
 execution requests termination of the spawned shell process. On Windows,
-Flowkit also makes a best-effort `taskkill /T /F` request for that invocation's
-shell PID before falling back to direct shell termination. On POSIX,
+Flowkit makes a best-effort `taskkill /T /F` request for that invocation's
+shell PID and falls back to direct shell termination only if that request
+fails. On POSIX,
 signal-bearing invocations run in a dedicated process group, which Flowkit
 attempts to terminate as a group. Neither approach guarantees termination of descendants
 that have escaped the shell's process tree; callers must not treat the returned
@@ -207,9 +208,14 @@ result as complete command-tree termination on Windows.
 
 For signal-bearing invocations, Flowkit waits for the spawned shell to close
 after requesting termination. If the operating system does not report closure
-within one second, it returns the cancellation or timeout result with the
-output captured so far; that bounded fallback is not confirmation that every
-process has exited.
+within one second on POSIX or three seconds on Windows, it returns the
+cancellation or timeout result with the output captured so far; that bounded
+fallback is not confirmation that every process has exited. POSIX
+signal-bearing invocations are in a separate process group, so terminal Ctrl+C
+does not reach them automatically; cancel through the supplied `AbortSignal`.
+
+Trailing stdout and stderr fragments are captured once. This corrects the
+duplicate final-partial-line output in earlier releases.
 
 ---
 

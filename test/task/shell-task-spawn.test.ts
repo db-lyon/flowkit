@@ -42,6 +42,17 @@ describe('ShellTask spawn boundaries', () => {
     expect(spawnMock).not.toHaveBeenCalled();
   });
 
+  it('rejects a non-AbortSignal before spawning', async () => {
+    const result = await new ShellTask({}, {
+      command: 'would-not-run',
+      signal: {} as AbortSignal,
+    }).run();
+
+    expect(result.success).toBe(false);
+    expect(result.error?.message).toBe('ShellTask "signal" must be an AbortSignal');
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
   it.runIf(process.platform === 'win32')('kills the spawned shell immediately when Windows taskkill fails', async () => {
     const child = processStub(101);
     const taskkill = processStub(102);
@@ -121,29 +132,6 @@ describe('ShellTask spawn boundaries', () => {
     child.emit('close', null, 'SIGKILL');
 
     await expect(resultPromise).resolves.toMatchObject({ success: false });
-  });
-
-  it.runIf(process.platform === 'win32')('uses direct shell kill when taskkill exceeds its watchdog', async () => {
-    vi.useFakeTimers();
-    try {
-      const child = processStub(601);
-      const taskkill = processStub(602);
-      spawnMock.mockReturnValueOnce(child).mockReturnValueOnce(taskkill);
-      const controller = new AbortController();
-      const resultPromise = new ShellTask({}, {
-        command: 'long-running',
-        signal: controller.signal,
-      }).run();
-
-      controller.abort();
-      await vi.advanceTimersByTimeAsync(50);
-      expect(child.kill).toHaveBeenCalledWith('SIGKILL');
-      child.emit('close', null, 'SIGKILL');
-
-      await expect(resultPromise).resolves.toMatchObject({ success: false });
-    } finally {
-      vi.useRealTimers();
-    }
   });
 
   it.runIf(process.platform === 'win32')('ignores taskkill failures after the shell task settles', async () => {
