@@ -25,3 +25,9 @@ ordinary work.
 This is additive for hosts: existing consumers do not need to change their
 runner context. Consumers that distinguish normal work from compensation or
 cleanup can read `ctx.executionPhase` inside a task.
+
+`TaskRegistry.create()` continues to accept host-style context without an
+`executionPhase`; Flowkit derives `task` before construction. Code that calls
+`registry.resolve()` and directly instantiates the returned constructor should
+pass a complete `TaskContext`, for example `{ executionPhase: 'task', ...ctx }`,
+or use `registry.create()` when it wants Flowkit to supply the phase.

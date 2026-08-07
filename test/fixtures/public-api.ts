@@ -46,8 +46,8 @@ const taskInput: TaskTaskContextInput = {};
 
 declare const rootConstructor: RootTaskConstructor;
 declare const taskConstructor: TaskTaskConstructor;
-const rootConstructedTask = new rootConstructor({}, {});
-const taskConstructedTask = new taskConstructor({}, {});
+const rootConstructedTask = new rootConstructor({ executionPhase: 'task' }, {});
+const taskConstructedTask = new taskConstructor({ executionPhase: 'task' }, {});
 
 class ExplicitContextTask extends RootBaseTask {
   constructor(ctx: RootTaskContext, options: Record<string, unknown>) {

@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { TaskRegistry } from '../../src/task/registry.js';
-import { BaseTask, type TaskResult, type TaskContext } from '../../src/task/base-task.js';
+import {
+  BaseTask,
+  type TaskResult,
+  type TaskContext,
+  type ExecutionPhase,
+} from '../../src/task/base-task.js';
 import type { TaskConstructor } from '../../src/task/registry.js';
 
 class StubTask extends BaseTask {
@@ -16,6 +21,24 @@ class StubTask extends BaseTask {
 }
 
 const Stub = StubTask as unknown as TaskConstructor;
+
+class ExplicitContextTask extends BaseTask {
+  private readonly observedPhase: ExecutionPhase;
+
+  constructor(ctx: TaskContext, options: Record<string, unknown>) {
+    const observedPhase = ctx.executionPhase;
+    super(ctx, options);
+    this.observedPhase = observedPhase;
+  }
+
+  get taskName() {
+    return 'explicit';
+  }
+
+  async execute(): Promise<TaskResult> {
+    return { success: true, data: { observedPhase: this.observedPhase } };
+  }
+}
 
 describe('TaskRegistry', () => {
   it('registers and resolves by name', async () => {
@@ -40,13 +63,60 @@ describe('TaskRegistry', () => {
     expect(result.data?.executionPhase).toBe('task');
   });
 
-  it('allows a resolved public constructor to default an omitted phase', async () => {
+  it('requires callers of resolved public constructors to pass a complete context', async () => {
     const reg = new TaskRegistry().register('my_task', Stub);
     const TaskClass = await reg.resolve('my_task');
 
-    const result = await new TaskClass({}, {}).run();
+    const result = await new TaskClass({ executionPhase: 'task' }, {}).run();
 
     expect(result.data?.executionPhase).toBe('task');
+  });
+
+  it('normalizes omitted phase in create before invoking explicit TaskContext constructors', async () => {
+    const reg = new TaskRegistry().register('explicit', ExplicitContextTask);
+
+    const task = await reg.create('explicit', {}, {});
+    const result = await task.run();
+
+    expect(task).toBeInstanceOf(ExplicitContextTask);
+    expect(result.data?.observedPhase).toBe('task');
+  });
+
+  it('normalizes omitted phase in create for dynamic class-path constructors', async () => {
+    const reg = new TaskRegistry();
+
+    const task = await reg.create('test.fixtures.dynamic-explicit-task', {}, {});
+    const result = await task.run();
+
+    expect(task.taskName).toBe('dynamic-explicit');
+    expect(result.data?.observedPhase).toBe('task');
+  });
+
+  it('preserves documented class-extends-Original wrap decorators', async () => {
+    const reg = new TaskRegistry().register('explicit', ExplicitContextTask);
+    reg.wrap('explicit', (Original) => {
+      const ExplicitOriginal = Original as unknown as typeof ExplicitContextTask;
+      return class Wrapped extends ExplicitOriginal {
+        get taskName() {
+          return 'wrapped';
+        }
+
+        async execute(): Promise<TaskResult> {
+          const result = await super.execute();
+          return {
+            ...result,
+            data: { ...result.data, wrapped: true },
+          };
+        }
+      };
+    });
+
+    const task = await reg.create('explicit', {}, {});
+    const result = await task.run();
+
+    expect(task.taskName).toBe('wrapped');
+    expect(result.data?.observedPhase).toBe('task');
+    expect(result.data?.wrapped).toBe(true);
   });
 
   it('preserves a supplied execution phase without mutating the input context', async () => {

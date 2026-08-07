@@ -277,13 +277,15 @@ class TaskRegistry {
 
 ```typescript
 type TaskConstructor = new (
-  ctx: TaskContextInput,
+  ctx: TaskContext,
   options: Record<string, unknown>,
 ) => BaseTask;
 ```
 
-Constructors that explicitly use `TaskContext` remain accepted by the registry;
-it derives the complete invocation context before construction.
+`TaskRegistry.create()` accepts `TaskContextInput` and derives the complete
+invocation context before construction. `resolve()` returns the registered or
+dynamically loaded constructor itself; callers that instantiate a resolved
+constructor directly must pass a complete `TaskContext`.
 
 ---
 
