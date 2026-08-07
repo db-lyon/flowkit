@@ -379,6 +379,7 @@ import { topologicalSort } from '@db-lyon/flowkit/dag';
 - [Custom tasks](docs/custom-tasks.md) — writing and registering tasks
 - [AI agents](docs/ai-agents.md) — LLM prompts, structured output, tool-calling agents
 - [Configuration](docs/configuration.md) — YAML schema, layering, deep merge
+- [Guards](docs/guards.md) — before/after pipeline around a host operation
 - [API reference](docs/api-reference.md) — full type and function reference
 
 ## License

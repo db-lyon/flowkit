@@ -10,7 +10,8 @@
     "./config": "./dist/config/index.js",
     "./task": "./dist/task/index.js",
     "./flow": "./dist/flow/index.js",
-    "./dag": "./dist/dag/index.js"
+    "./dag": "./dist/dag/index.js",
+    "./guard": "./dist/guard/index.js"
   },
   "files": [
     "/dist",
