@@ -106,7 +106,8 @@ describe('shell termination policy', () => {
       spawnProcess: () => taskkill as unknown as ChildProcess,
     });
 
-    taskkill.emit(...event());
+    const [eventName, eventValue] = event();
+    taskkill.emit(eventName, eventValue);
 
     expect(child.kill).toHaveBeenCalledTimes(1);
     expect(child.kill).toHaveBeenCalledWith('SIGKILL');

@@ -125,7 +125,7 @@ abstract class BaseTask<TOpts = Record<string, unknown>> {
   protected options: TOpts;
   protected logger: Logger;
 
-  constructor(ctx: TaskContext, options: TOpts);
+  constructor(ctx: TaskContextInput, options: TOpts);
 
   abstract get taskName(): string;
   abstract execute(): Promise<TaskResult>;
@@ -146,13 +146,46 @@ abstract class BaseTask<TOpts = Record<string, unknown>> {
 ### `TaskContext`
 
 ```typescript
+type ExecutionPhase =
+  | 'task'
+  | 'on_start'
+  | 'on_success'
+  | 'on_failure'
+  | 'finally'
+  | 'rollback';
+
 interface TaskContext {
+  readonly executionPhase?: ExecutionPhase;
   logger?: Logger;
   [key: string]: unknown;
 }
+
+// Alias of TaskContext, named for the host boundary it documents.
+type TaskContextInput = TaskContext;
+
+// What a running task observes: Flowkit resolved the phase at construction.
+type ResolvedTaskContext = TaskContext & {
+  readonly executionPhase: ExecutionPhase;
+};
 ```
 
-Shared context passed to every task. Add any properties you need (database connections, API clients, etc.).
+`executionPhase` is optional on `TaskContext` so that a host context interface
+built on it (`interface FlowContext extends TaskContext { ... }`) stays
+constructible without naming a phase Flowkit owns. Inside a task, read
+`this.executionPhase`, which is always resolved:
+
+```typescript
+protected get executionPhase(): ExecutionPhase;
+```
+
+Each task receives a fresh context whose `executionPhase` identifies why that
+specific invocation is running. Ordinary steps, nested-flow steps, direct
+`runTask` calls, task-to-task calls, and agent/tool work use `task`. Hook tasks
+use their named phase, and rollback-record invocations use `rollback`.
+
+Hosts continue to pass their shared services through `FlowRunnerConfig.context`
+without setting a phase. Flowkit owns the field and derives it per invocation;
+tasks should only read it.
 
 ---
 
@@ -236,7 +269,7 @@ class TaskRegistry {
   async resolve(classPathOrName: string): Promise<TaskConstructor>;
   async create(
     classPathOrName: string,
-    ctx: TaskContext,
+    ctx: TaskContextInput,
     options: Record<string, unknown>,
   ): Promise<BaseTask>;
   listRegistered(): string[];
@@ -250,7 +283,7 @@ class TaskRegistry {
 | `registerAll(entries)` | Bulk register by short name |
 | `registerClassPaths(entries)` | Bulk register by class path |
 | `resolve(nameOrPath)` | Look up a constructor. Falls back to dynamic filesystem import. |
-| `create(nameOrPath, ctx, opts)` | Resolve + instantiate in one call |
+| `create(nameOrPath, ctx, opts)` | Resolve + instantiate in one call; omitted phase defaults to `task` |
 | `listRegistered()` | Return all registered names and class paths |
 
 **`TaskConstructor`**
@@ -261,6 +294,11 @@ type TaskConstructor = new (
   options: Record<string, unknown>,
 ) => BaseTask;
 ```
+
+`TaskRegistry.create()` derives the complete invocation context before
+construction. `resolve()` returns the registered or dynamically loaded
+constructor itself; a caller that instantiates a resolved constructor directly
+gets the same defaulting from `BaseTask`, so it does not need to supply a phase.
 
 ---
 
@@ -292,7 +330,7 @@ interface FlowRunnerConfig {
   tasks: Record<string, TaskDefinition>;
   flows: Record<string, FlowDefinition>;
   registry: TaskRegistry;
-  context: TaskContext;
+  context: TaskContextInput;
   hooks?: FlowRunnerHooks;
   logger?: Logger;
 }

@@ -1,8 +1,14 @@
 import type { Logger } from '../logger.js';
 import { noopLogger } from '../logger.js';
 import type { TaskDefinition, FlowDefinition, FlowStep, AgentDefinition } from '../config/schema.js';
-import type { TaskResult, RollbackRecord } from '../task/base-task.js';
-import type { TaskContext } from '../task/base-task.js';
+import type {
+  TaskResult,
+  RollbackRecord,
+  TaskContext,
+  TaskContextInput,
+  ExecutionPhase,
+} from '../task/base-task.js';
+import { DEFAULT_EXECUTION_PHASE } from '../task/base-task.js';
 import type { TaskRegistry, TaskConstructor } from '../task/registry.js';
 import { AgentTask, type AgentTaskOptions } from '../task/agent-task.js';
 import type { TokenLedger } from '../task/token-ledger.js';
@@ -127,7 +133,8 @@ export interface FlowRunnerConfig {
   tasks: Record<string, TaskDefinition>;
   flows: Record<string, FlowDefinition>;
   registry: TaskRegistry;
-  context: TaskContext;
+  /** Host context; Flowkit supplies the per-invocation `executionPhase`. */
+  context: TaskContextInput;
   hooks?: FlowRunnerHooks;
   logger?: Logger;
   /** Optional evaluator for string `when:` expressions. */
@@ -200,15 +207,20 @@ export class FlowRunner {
     // Expose the configured task definitions so tasks invoked as agent tools
     // inherit their class_path/options defaults (see AgentTask), and wire the
     // flow/agent tool dispatchers.
+    // `executionPhase` is derived per invocation by `contextFor`, so a phase
+    // present on `config.context` is deliberately ignored rather than merged:
+    // the runner knows why each task is running and the host does not. This
+    // seed value only covers reads of `this.ctx` outside a task invocation.
     this.ctx = {
       ...config.context,
+      executionPhase: DEFAULT_EXECUTION_PHASE,
       registry: config.registry,
       taskDefinitions: this.tasks,
       taskReferenceContext: this.baseReferences,
+      runFlow: (flowName, params) => this.runFlowTool(flowName, params),
+      runAgent: (agentName, input, depth, ledger) =>
+        this.runAgentTool(agentName, input, depth, ledger),
     };
-    this.ctx.runFlow = (flowName, params) => this.runFlowTool(flowName, params);
-    this.ctx.runAgent = (agentName, input, depth, ledger) =>
-      this.runAgentTool(agentName, input, depth, ledger);
   }
 
   /**
@@ -217,10 +229,14 @@ export class FlowRunner {
    * sub-agent dispatch, so a task invoked several agents deep resolves its
    * configured defaults exactly as it would as a top-level step.
    */
-  private contextFor(references: ReferenceContext): TaskContext {
+  private contextFor(
+    references: ReferenceContext,
+    executionPhase: ExecutionPhase = DEFAULT_EXECUTION_PHASE,
+  ): TaskContext {
     return {
       ...this.ctx,
       taskReferenceContext: references,
+      executionPhase,
       runAgent: (agentName, input, depth, ledger) =>
         this.runAgentTool(agentName, input, depth, ledger, references),
     };
@@ -334,13 +350,15 @@ export class FlowRunner {
    * inside the task. Every path into a task goes through here, so running one
    * as a step, directly, as a tool, or during rollback all report failure
    * identically — and a step's `retries` cover construction, not just execution.
+   * Task-to-task calls derive their equivalent context in `BaseTask.resolve`.
    */
   private async executeTask(
     classPath: string,
     options: Record<string, unknown>,
-    references?: ReferenceContext,
+    references: ReferenceContext,
+    executionPhase: ExecutionPhase = DEFAULT_EXECUTION_PHASE,
   ): Promise<TaskResult> {
-    const taskCtx = references ? this.contextFor(references) : this.ctx;
+    const taskCtx = this.contextFor(references, executionPhase);
     try {
       const task = await this.registry.create(classPath, taskCtx, options);
       return task.run();
@@ -453,11 +471,19 @@ export class FlowRunner {
     return [self, ...children];
   }
 
-  /** Evaluate a step's `when:` to a boolean. Undefined `when` always runs. */
+  /**
+   * Evaluate a step's `when:` to a boolean. Undefined `when` always runs.
+   *
+   * `executionPhase` is the phase the step's own task will observe. It is
+   * threaded in rather than read off `this.ctx`, whose phase is only the
+   * constructor seed: a `finally` hook gating on `context.executionPhase`
+   * would otherwise be told `'task'` and run when it meant to skip.
+   */
   private async evaluateWhen(
     when: string | boolean | undefined,
     completedSteps: FlowStepResult[],
     params: Record<string, unknown> | undefined,
+    executionPhase: ExecutionPhase,
     errorCtx?: { error: Error; step?: string },
   ): Promise<boolean> {
     if (when === undefined) return true;
@@ -476,7 +502,7 @@ export class FlowRunner {
       return await this.conditionEvaluator(when, {
         steps: completedSteps,
         params,
-        context: this.ctx,
+        context: executionPhase === this.ctx.executionPhase ? this.ctx : { ...this.ctx, executionPhase },
         error,
       });
     }
@@ -584,7 +610,12 @@ export class FlowRunner {
         let conditionError: Error | undefined;
         if (!planStep.skipped && planStep.when !== undefined) {
           try {
-            conditionMet = await this.evaluateWhen(planStep.when, completedSteps, options.params);
+            conditionMet = await this.evaluateWhen(
+              planStep.when,
+              completedSteps,
+              options.params,
+              planStep.phase ?? DEFAULT_EXECUTION_PHASE,
+            );
           } catch (err) {
             conditionError = err instanceof Error ? err : new Error(String(err));
           }
@@ -799,7 +830,13 @@ export class FlowRunner {
     // Hook steps honor `when:` too — a falsy condition skips them silently.
     if (hookStep.when !== undefined) {
       try {
-        const ok = await this.evaluateWhen(hookStep.when, completedSteps, options.params, errorCtx);
+        const ok = await this.evaluateWhen(
+          hookStep.when,
+          completedSteps,
+          options.params,
+          hookStep.phase ?? DEFAULT_EXECUTION_PHASE,
+          errorCtx,
+        );
         if (!ok) return true;
       } catch (err) {
         hookErrors.push({
@@ -940,7 +977,12 @@ export class FlowRunner {
       `Executing step ${step.stepNumber}: ${step.name}`,
     );
 
-    return this.executeTask(taskDef.classPath, mergedOptions, refCtx);
+    return this.executeTask(
+      taskDef.classPath,
+      mergedOptions,
+      refCtx,
+      step.phase ?? DEFAULT_EXECUTION_PHASE,
+    );
   }
 
   private async performRollback(
@@ -963,7 +1005,12 @@ export class FlowRunner {
           rec.payload,
           this.baseReferences,
         );
-        const r = await this.executeTask(resolved.classPath, resolved.options);
+        const r = await this.executeTask(
+          resolved.classPath,
+          resolved.options,
+          this.baseReferences,
+          'rollback',
+        );
         if (r.success) {
           result.succeeded++;
         } else {

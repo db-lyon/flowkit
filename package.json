@@ -22,6 +22,7 @@
     "prepublishOnly": "tsc -b",
     "test": "vitest run",
     "test:package-api": "npm run build && tsc -p test/tsconfig.public-api.json",
+    "test:types": "tsc -p test/tsconfig.json",
     "test:watch": "vitest"
   },
   "keywords": [
@@ -36,7 +37,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/db-lyon/flowkit.git"
+    "url": "git+https://github.com/db-lyon/flowkit.git"
   },
   "dependencies": {
     "js-yaml": "^4",
@@ -46,7 +47,11 @@
     "@types/js-yaml": "^4",
     "@types/node": "^20",
     "typescript": "^5",
-    "vitest": "^2"
+    "vitest": "^3.2.7"
+  },
+  "overrides": {
+    "postcss": "8.5.26",
+    "vite": "6.4.3"
   },
   "engines": {
     "node": ">=20"

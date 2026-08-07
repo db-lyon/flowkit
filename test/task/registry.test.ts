@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { TaskRegistry } from '../../src/task/registry.js';
-import { BaseTask, type TaskResult, type TaskContext } from '../../src/task/base-task.js';
+import {
+  BaseTask,
+  type TaskResult,
+  type TaskContext,
+  type ExecutionPhase,
+} from '../../src/task/base-task.js';
 import type { TaskConstructor } from '../../src/task/registry.js';
 
 class StubTask extends BaseTask {
@@ -8,11 +13,34 @@ class StubTask extends BaseTask {
     return 'stub';
   }
   async execute(): Promise<TaskResult> {
-    return { success: true, data: { ran: true } };
+    return {
+      success: true,
+      data: { ran: true, executionPhase: this.ctx.executionPhase },
+    };
   }
 }
 
 const Stub = StubTask as unknown as TaskConstructor;
+
+class ExplicitContextTask extends BaseTask {
+  // Optional: a host constructing this class directly may omit the phase. The
+  // assertions below cover the registry path, which always supplies it.
+  private readonly observedPhase: ExecutionPhase | undefined;
+
+  constructor(ctx: TaskContext, options: Record<string, unknown>) {
+    const observedPhase = ctx.executionPhase;
+    super(ctx, options);
+    this.observedPhase = observedPhase;
+  }
+
+  get taskName() {
+    return 'explicit';
+  }
+
+  async execute(): Promise<TaskResult> {
+    return { success: true, data: { observedPhase: this.observedPhase } };
+  }
+}
 
 describe('TaskRegistry', () => {
   it('registers and resolves by name', async () => {
@@ -34,6 +62,75 @@ describe('TaskRegistry', () => {
     expect(task).toBeInstanceOf(StubTask);
     const result = await task.run();
     expect(result.success).toBe(true);
+    expect(result.data?.executionPhase).toBe('task');
+  });
+
+  it('requires callers of resolved public constructors to pass a complete context', async () => {
+    const reg = new TaskRegistry().register('my_task', Stub);
+    const TaskClass = await reg.resolve('my_task');
+
+    const result = await new TaskClass({ executionPhase: 'task' }, {}).run();
+
+    expect(result.data?.executionPhase).toBe('task');
+  });
+
+  it('normalizes omitted phase in create before invoking explicit TaskContext constructors', async () => {
+    const reg = new TaskRegistry().register('explicit', ExplicitContextTask);
+
+    const task = await reg.create('explicit', {}, {});
+    const result = await task.run();
+
+    expect(task).toBeInstanceOf(ExplicitContextTask);
+    expect(result.data?.observedPhase).toBe('task');
+  });
+
+  it('normalizes omitted phase in create for dynamic class-path constructors', async () => {
+    const reg = new TaskRegistry();
+
+    const task = await reg.create('test.fixtures.dynamic-explicit-task', {}, {});
+    const result = await task.run();
+
+    expect(task.taskName).toBe('dynamic-explicit');
+    expect(result.data?.observedPhase).toBe('task');
+  });
+
+  it('preserves documented class-extends-Original wrap decorators', async () => {
+    const reg = new TaskRegistry().register('explicit', ExplicitContextTask);
+    reg.wrap('explicit', (Original) => {
+      const ExplicitOriginal = Original as unknown as typeof ExplicitContextTask;
+      return class Wrapped extends ExplicitOriginal {
+        get taskName() {
+          return 'wrapped';
+        }
+
+        async execute(): Promise<TaskResult> {
+          const result = await super.execute();
+          return {
+            ...result,
+            data: { ...result.data, wrapped: true },
+          };
+        }
+      };
+    });
+
+    const task = await reg.create('explicit', {}, {});
+    const result = await task.run();
+
+    expect(task.taskName).toBe('wrapped');
+    expect(result.data?.observedPhase).toBe('task');
+    expect(result.data?.wrapped).toBe(true);
+  });
+
+  it('preserves a supplied execution phase without mutating the input context', async () => {
+    const reg = new TaskRegistry();
+    reg.register('my_task', Stub);
+    const ctx = { executionPhase: 'rollback' as const };
+
+    const task = await reg.create('my_task', ctx, {});
+    const result = await task.run();
+
+    expect(result.data?.executionPhase).toBe('rollback');
+    expect(ctx).toEqual({ executionPhase: 'rollback' });
   });
 
   it('lists all registered names and class paths', () => {
@@ -88,5 +185,68 @@ describe('TaskRegistry', () => {
     reg.register('ambiguous', Other);
     // class_path map is checked first
     expect(await reg.resolve('ambiguous')).toBe(StubTask);
+  });
+});
+
+describe('host context preservation', () => {
+  /** Reads whatever the host put on the context, including prototype members. */
+  class ProbeTask extends BaseTask {
+    get taskName() {
+      return 'probe';
+    }
+    async execute(): Promise<TaskResult> {
+      const ctx = this.ctx as { getDb?: () => string };
+      return {
+        success: true,
+        data: {
+          hasMethod: typeof ctx.getDb === 'function',
+          db: ctx.getDb?.(),
+          phase: this.executionPhase,
+        },
+      };
+    }
+  }
+
+  class HostContext {
+    // A class used as context needs the index signature to satisfy
+    // `TaskContext`; TypeScript does not infer one for class types.
+    [key: string]: unknown;
+    executionPhase?: ExecutionPhase;
+    getDb(): string {
+      return 'db-handle';
+    }
+  }
+
+  it('keeps prototype methods on a class-instance context through create', async () => {
+    const reg = new TaskRegistry().register('probe', ProbeTask as unknown as TaskConstructor);
+    const host = new HostContext();
+
+    const result = await (await reg.create('probe', host, {})).run();
+
+    // A spread would drop getDb: it lives on HostContext.prototype, not on the
+    // instance, so a host passing a service object must not be shallow-copied.
+    expect(result.data).toMatchObject({ hasMethod: true, db: 'db-handle', phase: 'task' });
+  });
+
+  it('hands the task the caller’s own context object when a phase is set', async () => {
+    const reg = new TaskRegistry().register('probe', ProbeTask as unknown as TaskConstructor);
+    const host = new HostContext();
+    host.executionPhase = 'rollback';
+
+    const task = await reg.create('probe', host, {});
+
+    // Identity, not just shape: anything comparing contexts (or writing shared
+    // state onto one) depends on this being the same object.
+    expect((task as unknown as { ctx: unknown }).ctx).toBe(host);
+    expect((await task.run()).data).toMatchObject({ phase: 'rollback' });
+  });
+
+  it('does not mutate the caller’s context when it must add a phase', async () => {
+    const reg = new TaskRegistry().register('probe', ProbeTask as unknown as TaskConstructor);
+    const host = new HostContext();
+
+    await (await reg.create('probe', host, {})).run();
+
+    expect(host.executionPhase).toBeUndefined();
   });
 });

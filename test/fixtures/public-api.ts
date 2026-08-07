@@ -4,10 +4,101 @@ import type { Guard as RootGuard, GuardContext } from '@db-lyon/flowkit';
 import type { Guard as GuardGuard } from '@db-lyon/flowkit/guard';
 import { GuardRegistry, runGuarded, guardContextBase } from '@db-lyon/flowkit/guard';
 import { GuardRegistry as RootGuardRegistry } from '@db-lyon/flowkit';
+import { ShellTask as RootShellTask } from '@db-lyon/flowkit';
+import { ShellTask as TaskShellTask } from '@db-lyon/flowkit/task';
+import { TaskRegistry as RootTaskRegistry } from '@db-lyon/flowkit';
+import { TaskRegistry as TaskTaskRegistry } from '@db-lyon/flowkit/task';
+import type { FlowRunnerConfig as RootFlowRunnerConfig } from '@db-lyon/flowkit';
+import type { FlowRunnerConfig as FlowFlowRunnerConfig } from '@db-lyon/flowkit/flow';
+import type {
+  ExecutionPhase as RootExecutionPhase,
+  ResolvedTaskContext as RootResolvedTaskContext,
+  TaskConstructor as RootTaskConstructor,
+  TaskContext as RootTaskContext,
+  TaskContextInput as RootTaskContextInput,
+  TaskResult as RootTaskResult,
+} from '@db-lyon/flowkit';
+import type {
+  ExecutionPhase as TaskExecutionPhase,
+  ResolvedTaskContext as TaskResolvedTaskContext,
+  TaskConstructor as TaskTaskConstructor,
+  TaskContext as TaskTaskContext,
+  TaskContextInput as TaskTaskContextInput,
+} from '@db-lyon/flowkit/task';
+import { BaseTask as RootBaseTask } from '@db-lyon/flowkit';
 
 const signal = new AbortController().signal;
 const rootOptions: RootShellTaskOptions = { command: 'echo root', signal };
 const taskOptions: TaskShellTaskOptions = { command: 'echo task', signal };
+const rootTask = new RootShellTask({}, rootOptions);
+const taskTask = new TaskShellTask({}, taskOptions);
+const rootCreatedTask = new RootTaskRegistry().create('root-task', {}, {});
+const taskCreatedTask = new TaskTaskRegistry().create('task-task', {}, {});
+const phases: RootExecutionPhase[] = [
+  'task',
+  'on_start',
+  'on_success',
+  'on_failure',
+  'finally',
+  'rollback',
+];
+const taskPhase: TaskExecutionPhase = 'task';
+const rootInput: RootTaskContextInput = {};
+const taskInput: TaskTaskContextInput = {};
+
+declare const rootConstructor: RootTaskConstructor;
+declare const taskConstructor: TaskTaskConstructor;
+const rootConstructedTask = new rootConstructor({ executionPhase: 'task' }, {});
+const taskConstructedTask = new taskConstructor({ executionPhase: 'task' }, {});
+
+class ExplicitContextTask extends RootBaseTask {
+  constructor(ctx: RootTaskContext, options: Record<string, unknown>) {
+    super(ctx, options);
+  }
+
+  get taskName(): string {
+    return 'explicit-context';
+  }
+
+  async execute(): Promise<RootTaskResult> {
+    return { success: true };
+  }
+}
+
+const explicitContextRegistry = new RootTaskRegistry().register(
+  'explicit-context',
+  ExplicitContextTask,
+);
+const explicitTaskContextRegistry = new TaskTaskRegistry().register(
+  'explicit-context',
+  ExplicitContextTask,
+);
+
+// A running task observes a resolved phase: Flowkit supplied it at construction.
+declare const rootContext: RootResolvedTaskContext;
+declare const taskContext: TaskResolvedTaskContext;
+const rootContextPhase: RootExecutionPhase = rootContext.executionPhase;
+const taskContextPhase: TaskExecutionPhase = taskContext.executionPhase;
+
+// A host builds and extends `TaskContext` without ever naming a phase, and an
+// interface extending it stays constructible. This is the ue-mcp `FlowContext`
+// shape; requiring the phase here would break every downstream context type.
+interface HostFlowContext extends RootTaskContext {
+  bridge: { call(method: string): Promise<unknown> };
+}
+const hostContext: HostFlowContext = { bridge: { call: async () => null } };
+const hostTaskContext: TaskTaskContext = {};
+const rootRunnerContext: RootFlowRunnerConfig['context'] = {};
+const flowRunnerContext: FlowFlowRunnerConfig['context'] = {};
+
+// @ts-expect-error lifecycle values are a closed public union.
+const invalidPhase: RootExecutionPhase = 'cleanup';
+
+// The lifecycle value is observable but runner-owned and read-only.
+// @ts-expect-error executionPhase cannot be mutated by a task.
+rootContext.executionPhase = 'rollback';
+// @ts-expect-error executionPhase cannot be mutated through the task subpath either.
+taskContext.executionPhase = 'finally';
 
 // The root and the ./guard subpath must describe the same guard, so a host can
 // import from either without the two drifting into incompatible shapes.
@@ -24,3 +115,22 @@ const run = runGuarded(guardContextBase(), registry, async () => 'ok');
 void rootOptions;
 void taskOptions;
 void run;
+void rootTask;
+void taskTask;
+void rootCreatedTask;
+void taskCreatedTask;
+void phases;
+void taskPhase;
+void rootInput;
+void taskInput;
+void rootConstructedTask;
+void taskConstructedTask;
+void explicitContextRegistry;
+void explicitTaskContextRegistry;
+void rootContextPhase;
+void taskContextPhase;
+void hostContext;
+void hostTaskContext;
+void rootRunnerContext;
+void flowRunnerContext;
+void invalidPhase;

@@ -24,8 +24,15 @@ export { loadConfig, loadRawYaml, findConfigFile } from './config/loader.js';
 export type { LoadConfigOptions, LoadedConfig } from './config/loader.js';
 
 // Task
-export { BaseTask } from './task/base-task.js';
-export type { TaskContext, TaskResult, RollbackRecord } from './task/base-task.js';
+export { BaseTask, DEFAULT_EXECUTION_PHASE, resolveTaskContext } from './task/base-task.js';
+export type {
+  TaskContext,
+  TaskContextInput,
+  ResolvedTaskContext,
+  ExecutionPhase,
+  TaskResult,
+  RollbackRecord,
+} from './task/base-task.js';
 export { ShellTask } from './task/shell-task.js';
 export type { ShellTaskOptions } from './task/shell-task.js';
 export { TaskRegistry } from './task/registry.js';

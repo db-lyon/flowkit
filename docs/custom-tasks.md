@@ -131,9 +131,22 @@ Inside a task:
 ```typescript
 async execute(): Promise<TaskResult> {
   const db = this.ctx.db as Database;
+  if (this.executionPhase === 'rollback') {
+    // This invocation is compensating for earlier successful work.
+  }
   // ...
 }
 ```
+
+`this.executionPhase` is a public, read-only lifecycle value:
+`'task' | 'on_start' | 'on_success' | 'on_failure' | 'finally' | 'rollback'`.
+Ordinary steps (including nested-flow steps), direct `runTask` calls,
+task-to-task calls, and agent/tool work receive `'task'`. Hook tasks receive
+their hook phase, and rollback-record invocations receive `'rollback'`.
+Flowkit supplies the value; existing runner configurations do not need to add
+it to `context`. `ctx.executionPhase` holds the same value but is typed
+optional, because `TaskContext` is also the shape hosts build their own context
+interfaces from; prefer the `this.executionPhase` accessor.
 
 Treat the context as read-only. Each task is handed its own derived context, so assigning a key inside a task (`this.ctx.cached = x`) does not reach the next step, another task, or a sub-agent. To share mutable state, put a mutable object on the context up front and write into that:
 
