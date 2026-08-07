@@ -20,6 +20,7 @@ interface PhaseOptions {
   label: string;
   fail?: boolean;
   signal?: AbortSignal;
+  mutatePhase?: ExecutionPhase;
   rollback?: { taskName: string; payload: Record<string, unknown> };
   gate?: Promise<void>;
 }
@@ -34,6 +35,10 @@ class PhaseTask extends BaseTask<PhaseOptions> {
       phase: this.ctx.executionPhase,
       context: this.ctx,
     });
+    if (this.options.mutatePhase) {
+      (this.ctx as { executionPhase: ExecutionPhase }).executionPhase =
+        this.options.mutatePhase;
+    }
     await this.options.gate;
     if (this.options.signal?.aborted) {
       return { success: false, error: new Error('cancelled') };
@@ -308,5 +313,46 @@ describe('TaskContext.executionPhase', () => {
       ['blocked-hook', 'on_failure'],
       ['concurrent-task', 'task'],
     ]);
+  });
+
+  it('ignores a host-supplied phase and isolates forced task-side mutation', async () => {
+    const observations: Observation[] = [];
+    const runner = createRunner(
+      observations,
+      {
+        main: {
+          steps: {
+            1: {
+              task: 'phase',
+              options: { label: 'mutator', mutatePhase: 'rollback' },
+            },
+            2: { task: 'phase', options: { label: 'after-mutation' } },
+          },
+        },
+      },
+      { executionPhase: 'finally' },
+    );
+
+    expect((await runner.run({ flowName: 'main' })).success).toBe(true);
+    expect(observations.map(({ label, phase }) => [label, phase])).toEqual([
+      ['mutator', 'task'],
+      ['after-mutation', 'task'],
+    ]);
+    expect(observations[0]?.context).not.toBe(observations[1]?.context);
+  });
+
+  it('derives a fresh task context for every retry attempt', async () => {
+    const observations: Observation[] = [];
+    const runner = createRunner(observations, {
+      main: {
+        steps: {
+          1: { task: 'phase', retries: 1, options: { label: 'attempt', fail: true } },
+        },
+      },
+    });
+
+    expect((await runner.run({ flowName: 'main' })).success).toBe(false);
+    expect(observations.map(({ phase }) => phase)).toEqual(['task', 'task']);
+    expect(observations[0]?.context).not.toBe(observations[1]?.context);
   });
 });
