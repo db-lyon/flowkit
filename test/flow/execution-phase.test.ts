@@ -359,3 +359,43 @@ describe('TaskContext.executionPhase', () => {
     expect(observations[0]?.context).not.toBe(observations[1]?.context);
   });
 });
+
+describe('executionPhase in when: conditions', () => {
+  it('hands a conditionEvaluator the phase the gated task will observe', async () => {
+    const seen: Array<[string, unknown]> = [];
+    const observations: Observation[] = [];
+    const registry = new TaskRegistry().register(
+      'phase',
+      PhaseTask as unknown as TaskConstructor,
+    );
+    const runner = new FlowRunner({
+      tasks: { phase: { class_path: 'phase', options: {} } },
+      flows: {
+        main: {
+          steps: { 1: { task: 'phase', when: 'gate-step', options: { label: 'main' } } },
+          on_success: [
+            { task: 'phase', when: 'gate-success', options: { label: 'success' } },
+          ],
+          finally: [{ task: 'phase', when: 'gate-finally', options: { label: 'finally' } }],
+        },
+      } as never,
+      registry,
+      context: { observations },
+      conditionEvaluator: (when, ctx) => {
+        seen.push([String(when), ctx.context.executionPhase]);
+        return true;
+      },
+    });
+
+    expect((await runner.run({ flowName: 'main' })).success).toBe(true);
+
+    // Each gate sees its own step's phase, matching what that step's task then
+    // observes — not the runner-level 'task' seed.
+    expect(seen).toEqual([
+      ['gate-step', 'task'],
+      ['gate-success', 'on_success'],
+      ['gate-finally', 'finally'],
+    ]);
+    expect(observations.map(({ phase }) => phase)).toEqual(['task', 'on_success', 'finally']);
+  });
+});

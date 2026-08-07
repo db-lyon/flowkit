@@ -101,6 +101,32 @@ export type ResolvedTaskContext = TaskContext & {
 };
 
 /**
+ * Phase used when nothing better is known: direct construction, or a
+ * `registry.create()` whose caller supplied no phase. Declared once and
+ * referenced everywhere, so adding a phase or changing the fallback is a
+ * single-site edit rather than a hunt through the runner and the registry.
+ */
+export const DEFAULT_EXECUTION_PHASE: ExecutionPhase = 'task';
+
+/**
+ * The one place a host context becomes a task context.
+ *
+ * Returns `ctx` **itself** when the phase is already set, which is every path
+ * through `FlowRunner`. That matters beyond allocation: a host may pass a class
+ * instance or a service object as its context, and copying would strip its
+ * prototype methods and break identity for anything comparing contexts. When a
+ * phase must be added, the prototype is carried onto the new object for the
+ * same reason.
+ */
+export function resolveTaskContext(ctx: TaskContextInput): ResolvedTaskContext {
+  if (ctx.executionPhase !== undefined) return ctx as ResolvedTaskContext;
+  const proto = Object.getPrototypeOf(ctx) as object | null;
+  return Object.assign(Object.create(proto) as TaskContext, ctx, {
+    executionPhase: DEFAULT_EXECUTION_PHASE,
+  }) as ResolvedTaskContext;
+}
+
+/**
  * Rollback record returned by a successful mutation task.
  * The runner invokes `taskName` with `payload` (in reverse step order)
  * when `rollback_on_failure` is enabled and a subsequent step fails.
@@ -131,7 +157,7 @@ export abstract class BaseTask<TOpts = Record<string, unknown>> {
   protected options: TOpts;
 
   constructor(ctx: TaskContextInput, options: TOpts) {
-    this.ctx = { ...ctx, executionPhase: ctx.executionPhase ?? 'task' };
+    this.ctx = resolveTaskContext(ctx);
     this.options = options;
     const parentLogger = this.ctx.logger ?? noopLogger;
     this.logger = parentLogger.child({ task: this.constructor.name });
@@ -185,7 +211,9 @@ export abstract class BaseTask<TOpts = Record<string, unknown>> {
       options,
       this.ctx.taskReferenceContext,
     );
-    const childCtx: TaskContext = { ...this.ctx, executionPhase: 'task' };
+    // A task-to-task call is ordinary work: it does not inherit the caller's
+    // hook or rollback phase.
+    const childCtx: TaskContext = { ...this.ctx, executionPhase: DEFAULT_EXECUTION_PHASE };
     return registry.create(resolved.classPath, childCtx, resolved.options) as Promise<T>;
   }
 

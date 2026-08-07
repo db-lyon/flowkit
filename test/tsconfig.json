@@ -8,6 +8,10 @@
     "rootDir": "..",
     "tsBuildInfoFile": null
   },
-  "include": ["../src/**/*.ts", "**/*.test.ts"],
-  "exclude": ["fixtures"]
+  "include": ["../src/**/*.ts", "**/*.test.ts", "fixtures/**/*.ts"],
+  // public-api.ts imports the *built package* by its published name and is
+  // checked by tsconfig.public-api.json after a build; it cannot resolve here.
+  // Every other fixture is source and must be typechecked with the tests,
+  // otherwise a fixture loaded by runtime class path is checked by nothing.
+  "exclude": ["fixtures/public-api.ts"]
 }

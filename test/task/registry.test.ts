@@ -187,3 +187,66 @@ describe('TaskRegistry', () => {
     expect(await reg.resolve('ambiguous')).toBe(StubTask);
   });
 });
+
+describe('host context preservation', () => {
+  /** Reads whatever the host put on the context, including prototype members. */
+  class ProbeTask extends BaseTask {
+    get taskName() {
+      return 'probe';
+    }
+    async execute(): Promise<TaskResult> {
+      const ctx = this.ctx as { getDb?: () => string };
+      return {
+        success: true,
+        data: {
+          hasMethod: typeof ctx.getDb === 'function',
+          db: ctx.getDb?.(),
+          phase: this.executionPhase,
+        },
+      };
+    }
+  }
+
+  class HostContext {
+    // A class used as context needs the index signature to satisfy
+    // `TaskContext`; TypeScript does not infer one for class types.
+    [key: string]: unknown;
+    executionPhase?: ExecutionPhase;
+    getDb(): string {
+      return 'db-handle';
+    }
+  }
+
+  it('keeps prototype methods on a class-instance context through create', async () => {
+    const reg = new TaskRegistry().register('probe', ProbeTask as unknown as TaskConstructor);
+    const host = new HostContext();
+
+    const result = await (await reg.create('probe', host, {})).run();
+
+    // A spread would drop getDb: it lives on HostContext.prototype, not on the
+    // instance, so a host passing a service object must not be shallow-copied.
+    expect(result.data).toMatchObject({ hasMethod: true, db: 'db-handle', phase: 'task' });
+  });
+
+  it('hands the task the caller’s own context object when a phase is set', async () => {
+    const reg = new TaskRegistry().register('probe', ProbeTask as unknown as TaskConstructor);
+    const host = new HostContext();
+    host.executionPhase = 'rollback';
+
+    const task = await reg.create('probe', host, {});
+
+    // Identity, not just shape: anything comparing contexts (or writing shared
+    // state onto one) depends on this being the same object.
+    expect((task as unknown as { ctx: unknown }).ctx).toBe(host);
+    expect((await task.run()).data).toMatchObject({ phase: 'rollback' });
+  });
+
+  it('does not mutate the caller’s context when it must add a phase', async () => {
+    const reg = new TaskRegistry().register('probe', ProbeTask as unknown as TaskConstructor);
+    const host = new HostContext();
+
+    await (await reg.create('probe', host, {})).run();
+
+    expect(host.executionPhase).toBeUndefined();
+  });
+});

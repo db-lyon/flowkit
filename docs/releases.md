@@ -46,3 +46,14 @@ directly instantiates the returned constructor gets the same defaulting from
 
 Guard hosts are unaffected: `DiscoverTaskGuardsOptions.contextFor` returns
 `TaskContext`, unchanged from 0.14.0.
+
+The context a host passes is no longer copied when it already carries a phase,
+which is every path through `FlowRunner`. A host may therefore pass a class
+instance or service object as its context and keep its prototype methods and
+object identity; previously each invocation shallow-copied it. `Flowkit` exports
+`resolveTaskContext` and `DEFAULT_EXECUTION_PHASE` for hosts that construct
+tasks themselves and want the same normalization.
+
+A string `when:` condition now receives the phase of the step it gates, so a
+`finally` hook gating on `context.executionPhase` sees `'finally'` rather than
+the runner's seed value.

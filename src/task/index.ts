@@ -1,4 +1,4 @@
-export { BaseTask } from './base-task.js';
+export { BaseTask, DEFAULT_EXECUTION_PHASE, resolveTaskContext } from './base-task.js';
 export type {
   TaskContext,
   TaskContextInput,

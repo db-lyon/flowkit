@@ -2,6 +2,7 @@ import * as path from 'node:path';
 import * as fs from 'node:fs';
 import {
   BaseTask,
+  resolveTaskContext,
   type TaskContext,
   type TaskContextInput,
 } from './base-task.js';
@@ -10,13 +11,6 @@ export type TaskConstructor = new (
   ctx: TaskContext,
   options: Record<string, unknown>,
 ) => BaseTask;
-
-function withCompleteContext(ctx: TaskContextInput): TaskContext {
-  return {
-    ...ctx,
-    executionPhase: ctx.executionPhase ?? 'task',
-  };
-}
 
 export class TaskRegistry {
   private classPathMap = new Map<string, TaskConstructor>();
@@ -63,14 +57,22 @@ export class TaskRegistry {
     return this.loadDynamic(classPathOrName);
   }
 
-  /** Resolve + instantiate in one call. */
+  /**
+   * Resolve + instantiate in one call.
+   *
+   * The phase is resolved *before* construction, not left to `BaseTask`, so a
+   * host-authored constructor that reads `ctx.executionPhase` before calling
+   * `super()` sees the same value the task will. `resolveTaskContext` is a
+   * no-op when the caller already supplied a phase, which is every path through
+   * `FlowRunner`.
+   */
   async create(
     classPathOrName: string,
     ctx: TaskContextInput,
     options: Record<string, unknown>,
   ): Promise<BaseTask> {
     const TaskClass = await this.resolve(classPathOrName);
-    return new TaskClass(withCompleteContext(ctx), options);
+    return new TaskClass(resolveTaskContext(ctx), options);
   }
 
   /**
