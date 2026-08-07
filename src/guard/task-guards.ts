@@ -137,6 +137,20 @@ export function discoverTaskGuards<Ctx extends GuardContext, TResult = unknown>(
 
     const runTask = async (ctx: Ctx, result?: TResult) => {
       try {
+        // A guard task deliberately runs as ordinary work: `contextFor` returns
+        // a host context with no phase, so `registry.create` resolves
+        // DEFAULT_EXECUTION_PHASE and the task sees `'task'`. That is a
+        // decision, not an oversight — this is the seam where a `'guard'` phase
+        // would be introduced.
+        //
+        // It is not introduced now because the right granularity is unknown: a
+        // guard is `before` or `after` and may be scoped (`beforeWrite`), so a
+        // single `'guard'` value could be the wrong shape, and `ExecutionPhase`
+        // is a closed union whose members cannot be revised cheaply (adding one
+        // breaks exhaustive switches and `Record<ExecutionPhase, T>` in
+        // consumers). A host needing the distinction today can supply it
+        // itself, e.g. `contextFor: (c) => ({ ...ctx, isGuard: true })`, or read
+        // the task name, which is always `guard.<name>.<phase>`.
         const task = await registry.create(
           taskName,
           options.contextFor(ctx),
