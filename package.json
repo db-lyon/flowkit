@@ -1,6 +1,6 @@
 {
   "name": "@db-lyon/flowkit",
-  "version": "0.13.0",
+  "version": "0.14.0",
   "description": "YAML-configured task and flow orchestration engine",
   "type": "module",
   "main": "dist/index.js",
@@ -10,7 +10,8 @@
     "./config": "./dist/config/index.js",
     "./task": "./dist/task/index.js",
     "./flow": "./dist/flow/index.js",
-    "./dag": "./dist/dag/index.js"
+    "./dag": "./dist/dag/index.js",
+    "./guard": "./dist/guard/index.js"
   },
   "files": [
     "/dist",

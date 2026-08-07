@@ -431,6 +431,116 @@ class MissingDependencyError extends Error {
 
 ---
 
+## Guard
+
+*Import from `@db-lyon/flowkit` or `@db-lyon/flowkit/guard`*
+
+A before/after pipeline around one host operation. See [guards.md](guards.md) for the guide.
+
+### `Guard<Ctx, TResult>`
+
+```typescript
+interface Guard<Ctx extends GuardContext = GuardContext, TResult = unknown> {
+  readonly name: string;
+  readonly order?: number;                                  // lower runs first, default 0
+  appliesTo?(ctx: Ctx): boolean | Promise<boolean>;         // default: always
+  before?(ctx: Ctx): Promise<void>;                         // throw to DENY
+  after?(ctx: Ctx, result: TResult): Promise<TResult | void>; // return to replace
+}
+```
+
+---
+
+### `GuardContext`
+
+The minimum a host context must provide. Extend it with whatever the operation carries.
+
+```typescript
+interface GuardContext {
+  meta: Map<string, unknown>;  // scratch space shared across guards for one operation
+}
+
+function guardContextBase(): GuardContext
+```
+
+---
+
+### `lazy(ctx, key, compute)`
+
+Wrap a computation so it runs at most once per operation, cached into `ctx.meta` under `key`.
+
+```typescript
+function lazy<T>(ctx: GuardContext, key: string, compute: () => T): () => T
+```
+
+---
+
+### `GuardRegistry<Ctx, TResult>`
+
+Ordered set of guards. Sorted on registration by `order`, then by name.
+
+```typescript
+class GuardRegistry<Ctx extends GuardContext = GuardContext, TResult = unknown> {
+  register(guard: Guard<Ctx, TResult>): this;
+  registerAll(guards: Iterable<Guard<Ctx, TResult>>): this;
+  list(): readonly Guard<Ctx, TResult>[];
+  names(): string[];
+  get size(): number;
+}
+```
+
+---
+
+### `runGuarded(ctx, registry, invoke)`
+
+Run one operation through the pipeline: `before` in order, `invoke`, `after` in reverse.
+
+```typescript
+function runGuarded<Ctx extends GuardContext, TResult>(
+  ctx: Ctx,
+  registry: GuardRegistry<Ctx, TResult>,
+  invoke: () => Promise<TResult>,
+): Promise<TResult>
+```
+
+Applicability resolves once, up front. A `before` throw denies the operation and propagates unchanged. With an empty registry this is exactly `invoke()`.
+
+---
+
+### `discoverTaskGuards(registry, options)`
+
+Build a `Guard` for every `guard.<name>.<before|after><Scope?>` task in a `TaskRegistry`.
+
+```typescript
+function discoverTaskGuards<Ctx extends GuardContext, TResult = unknown>(
+  registry: TaskRegistry,
+  options: DiscoverTaskGuardsOptions<Ctx, TResult>,
+): Guard<Ctx, TResult>[]
+
+interface DiscoverTaskGuardsOptions<Ctx extends GuardContext, TResult = unknown> {
+  scopes?: Record<string, (ctx: Ctx) => boolean | Promise<boolean>>;
+  contextFor(ctx: Ctx): TaskContext;
+  optionsFor(ctx: Ctx, result?: TResult): Record<string, unknown>;
+  onDeny?(info: GuardTaskFailure<Ctx>): Error;
+  onError?(info: GuardTaskFailure<Ctx>): Error;
+  onAfterFailure?(info: GuardTaskFailure<Ctx>): void;
+  logger?: Logger;
+}
+
+interface GuardTaskFailure<Ctx extends GuardContext> {
+  readonly guard: string;     // 'p4' for guard.p4.beforeWrite
+  readonly phase: string;     // 'beforeWrite'
+  readonly taskName: string;  // 'guard.p4.beforeWrite'
+  readonly ctx: Ctx;
+  readonly reason: string;
+  readonly cause?: Error;
+}
+```
+
+Throws at discovery if a task names a scope the host did not register.
+
+---
+
 ## Logger
 
 *Import from `@db-lyon/flowkit`*

@@ -77,6 +77,18 @@ export type {
   HookError,
   RollbackResult,
 } from './flow/runner.js';
+// Guard — before/after pipeline around a host operation
+export { GuardRegistry } from './guard/registry.js';
+export { runGuarded } from './guard/pipeline.js';
+export { discoverTaskGuards } from './guard/task-guards.js';
+export type {
+  DiscoverTaskGuardsOptions,
+  GuardScope,
+  GuardTaskFailure,
+} from './guard/task-guards.js';
+export { guardContextBase, lazy } from './guard/types.js';
+export type { Guard, GuardContext } from './guard/types.js';
+
 // References — shared by the task and flow layers
 export { resolveReferences } from './references.js';
 export type { ReferenceableStep, ReferenceContext } from './references.js';
