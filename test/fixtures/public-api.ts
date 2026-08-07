@@ -12,14 +12,18 @@ import type { FlowRunnerConfig as RootFlowRunnerConfig } from '@db-lyon/flowkit'
 import type { FlowRunnerConfig as FlowFlowRunnerConfig } from '@db-lyon/flowkit/flow';
 import type {
   ExecutionPhase as RootExecutionPhase,
+  TaskConstructor as RootTaskConstructor,
   TaskContext as RootTaskContext,
   TaskContextInput as RootTaskContextInput,
+  TaskResult as RootTaskResult,
 } from '@db-lyon/flowkit';
 import type {
   ExecutionPhase as TaskExecutionPhase,
+  TaskConstructor as TaskTaskConstructor,
   TaskContext as TaskTaskContext,
   TaskContextInput as TaskTaskContextInput,
 } from '@db-lyon/flowkit/task';
+import { BaseTask as RootBaseTask } from '@db-lyon/flowkit';
 
 const signal = new AbortController().signal;
 const rootOptions: RootShellTaskOptions = { command: 'echo root', signal };
@@ -39,6 +43,34 @@ const phases: RootExecutionPhase[] = [
 const taskPhase: TaskExecutionPhase = 'task';
 const rootInput: RootTaskContextInput = {};
 const taskInput: TaskTaskContextInput = {};
+
+declare const rootConstructor: RootTaskConstructor;
+declare const taskConstructor: TaskTaskConstructor;
+const rootConstructedTask = new rootConstructor({}, {});
+const taskConstructedTask = new taskConstructor({}, {});
+
+class ExplicitContextTask extends RootBaseTask {
+  constructor(ctx: RootTaskContext, options: Record<string, unknown>) {
+    super(ctx, options);
+  }
+
+  get taskName(): string {
+    return 'explicit-context';
+  }
+
+  async execute(): Promise<RootTaskResult> {
+    return { success: true };
+  }
+}
+
+const explicitContextRegistry = new RootTaskRegistry().register(
+  'explicit-context',
+  ExplicitContextTask,
+);
+const explicitTaskContextRegistry = new TaskTaskRegistry().register(
+  'explicit-context',
+  ExplicitContextTask,
+);
 
 declare const rootContext: RootTaskContext;
 declare const taskContext: TaskTaskContext;
@@ -79,6 +111,10 @@ void phases;
 void taskPhase;
 void rootInput;
 void taskInput;
+void rootConstructedTask;
+void taskConstructedTask;
+void explicitContextRegistry;
+void explicitTaskContextRegistry;
 void rootContextPhase;
 void taskContextPhase;
 void rootRunnerContext;

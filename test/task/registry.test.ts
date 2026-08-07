@@ -40,6 +40,15 @@ describe('TaskRegistry', () => {
     expect(result.data?.executionPhase).toBe('task');
   });
 
+  it('allows a resolved public constructor to default an omitted phase', async () => {
+    const reg = new TaskRegistry().register('my_task', Stub);
+    const TaskClass = await reg.resolve('my_task');
+
+    const result = await new TaskClass({}, {}).run();
+
+    expect(result.data?.executionPhase).toBe('task');
+  });
+
   it('preserves a supplied execution phase without mutating the input context', async () => {
     const reg = new TaskRegistry();
     reg.register('my_task', Stub);

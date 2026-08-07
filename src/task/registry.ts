@@ -7,29 +7,40 @@ import {
 } from './base-task.js';
 
 export type TaskConstructor = new (
+  ctx: TaskContextInput,
+  options: Record<string, unknown>,
+) => BaseTask;
+
+/**
+ * Constructors written against the pre-lifecycle TaskContext contract may
+ * still require a complete context. The registry always supplies one.
+ */
+type CompleteContextTaskConstructor = new (
   ctx: TaskContext,
   options: Record<string, unknown>,
 ) => BaseTask;
 
+type RegisteredTaskConstructor = TaskConstructor | CompleteContextTaskConstructor;
+
 export class TaskRegistry {
-  private classPathMap = new Map<string, TaskConstructor>();
-  private nameMap = new Map<string, TaskConstructor>();
+  private classPathMap = new Map<string, RegisteredTaskConstructor>();
+  private nameMap = new Map<string, RegisteredTaskConstructor>();
   private dynamicCache = new Map<string, TaskConstructor>();
 
   /** Register a task by short name (e.g. `'deploy'`). */
-  register(name: string, ctor: TaskConstructor): this {
+  register(name: string, ctor: RegisteredTaskConstructor): this {
     this.nameMap.set(name, ctor);
     return this;
   }
 
   /** Register a task by class path (e.g. `'my.tasks.Deploy'`). */
-  registerClassPath(classPath: string, ctor: TaskConstructor): this {
+  registerClassPath(classPath: string, ctor: RegisteredTaskConstructor): this {
     this.classPathMap.set(classPath, ctor);
     return this;
   }
 
   /** Bulk-register by short name. */
-  registerAll(entries: Record<string, TaskConstructor>): this {
+  registerAll(entries: Record<string, RegisteredTaskConstructor>): this {
     for (const [name, ctor] of Object.entries(entries)) {
       this.nameMap.set(name, ctor);
     }
@@ -37,7 +48,7 @@ export class TaskRegistry {
   }
 
   /** Bulk-register by class path. */
-  registerClassPaths(entries: Record<string, TaskConstructor>): this {
+  registerClassPaths(entries: Record<string, RegisteredTaskConstructor>): this {
     for (const [classPath, ctor] of Object.entries(entries)) {
       this.classPathMap.set(classPath, ctor);
     }
@@ -51,7 +62,7 @@ export class TaskRegistry {
   async resolve(classPathOrName: string): Promise<TaskConstructor> {
     const builtin =
       this.classPathMap.get(classPathOrName) ?? this.nameMap.get(classPathOrName);
-    if (builtin) return builtin;
+    if (builtin) return builtin as TaskConstructor;
 
     return this.loadDynamic(classPathOrName);
   }
@@ -99,7 +110,7 @@ export class TaskRegistry {
           `Registered: ${this.listRegistered().join(', ')}`,
       );
     }
-    const wrapped = wrapper(original);
+    const wrapped = wrapper(original as TaskConstructor);
     // Always write to nameMap so subsequent resolve() finds it
     this.nameMap.set(name, wrapped);
     return this;

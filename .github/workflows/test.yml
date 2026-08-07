@@ -29,4 +29,5 @@ jobs:
 
       - run: npm ci
       - run: npm run test:package-api
+      - run: npm run test:types
       - run: npm test

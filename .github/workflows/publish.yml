@@ -46,6 +46,12 @@ jobs:
       - run: npm ci
         if: steps.version.outputs.changed == 'true'
 
+      - run: npm run test:package-api
+        if: steps.version.outputs.changed == 'true'
+
+      - run: npm run test:types
+        if: steps.version.outputs.changed == 'true'
+
       - run: npm test
         if: steps.version.outputs.changed == 'true'
 

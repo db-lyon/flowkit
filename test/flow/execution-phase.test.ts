@@ -217,18 +217,20 @@ describe('TaskContext.executionPhase', () => {
       },
     };
     const originalAgentExecute = AgentTask.prototype.execute;
-    const agentSpy = vi.spyOn(AgentTask.prototype, 'execute').mockImplementation(async function () {
-      const instance = this as unknown as {
-        ctx: TaskContext & { observations: Observation[] };
-        options: { system?: string };
-      };
-      instance.ctx.observations.push({
-        label: `agent:${instance.options.system}`,
-        phase: instance.ctx.executionPhase,
-        context: instance.ctx,
+    const agentSpy = vi
+      .spyOn(AgentTask.prototype, 'execute')
+      .mockImplementation(async function (this: AgentTask) {
+        const instance = this as unknown as {
+          ctx: TaskContext & { observations: Observation[] };
+          options: { system?: string };
+        };
+        instance.ctx.observations.push({
+          label: `agent:${instance.options.system}`,
+          phase: instance.ctx.executionPhase,
+          context: instance.ctx,
+        });
+        return originalAgentExecute.call(this);
       });
-      return originalAgentExecute.call(this);
-    });
     const registry = new TaskRegistry().register(
       'phase',
       PhaseTask as unknown as TaskConstructor,
