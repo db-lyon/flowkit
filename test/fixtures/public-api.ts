@@ -6,6 +6,8 @@ import { GuardRegistry, runGuarded, guardContextBase } from '@db-lyon/flowkit/gu
 import { GuardRegistry as RootGuardRegistry } from '@db-lyon/flowkit';
 import { ShellTask as RootShellTask } from '@db-lyon/flowkit';
 import { ShellTask as TaskShellTask } from '@db-lyon/flowkit/task';
+import { TaskRegistry as RootTaskRegistry } from '@db-lyon/flowkit';
+import { TaskRegistry as TaskTaskRegistry } from '@db-lyon/flowkit/task';
 import type { FlowRunnerConfig as RootFlowRunnerConfig } from '@db-lyon/flowkit';
 import type { FlowRunnerConfig as FlowFlowRunnerConfig } from '@db-lyon/flowkit/flow';
 import type {
@@ -24,6 +26,8 @@ const rootOptions: RootShellTaskOptions = { command: 'echo root', signal };
 const taskOptions: TaskShellTaskOptions = { command: 'echo task', signal };
 const rootTask = new RootShellTask({}, rootOptions);
 const taskTask = new TaskShellTask({}, taskOptions);
+const rootCreatedTask = new RootTaskRegistry().create('root-task', {}, {});
+const taskCreatedTask = new TaskTaskRegistry().create('task-task', {}, {});
 const phases: RootExecutionPhase[] = [
   'task',
   'on_start',
@@ -69,6 +73,8 @@ void taskOptions;
 void run;
 void rootTask;
 void taskTask;
+void rootCreatedTask;
+void taskCreatedTask;
 void phases;
 void taskPhase;
 void rootInput;

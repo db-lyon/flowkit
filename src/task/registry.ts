@@ -1,6 +1,10 @@
 import * as path from 'node:path';
 import * as fs from 'node:fs';
-import { BaseTask, type TaskContext } from './base-task.js';
+import {
+  BaseTask,
+  type TaskContext,
+  type TaskContextInput,
+} from './base-task.js';
 
 export type TaskConstructor = new (
   ctx: TaskContext,
@@ -55,11 +59,15 @@ export class TaskRegistry {
   /** Resolve + instantiate in one call. */
   async create(
     classPathOrName: string,
-    ctx: TaskContext,
+    ctx: TaskContextInput,
     options: Record<string, unknown>,
   ): Promise<BaseTask> {
     const TaskClass = await this.resolve(classPathOrName);
-    return new TaskClass(ctx, options);
+    const taskCtx: TaskContext = {
+      ...ctx,
+      executionPhase: ctx.executionPhase ?? 'task',
+    };
+    return new TaskClass(taskCtx, options);
   }
 
   /**

@@ -256,7 +256,7 @@ class TaskRegistry {
   async resolve(classPathOrName: string): Promise<TaskConstructor>;
   async create(
     classPathOrName: string,
-    ctx: TaskContext,
+    ctx: TaskContextInput,
     options: Record<string, unknown>,
   ): Promise<BaseTask>;
   listRegistered(): string[];
@@ -270,7 +270,7 @@ class TaskRegistry {
 | `registerAll(entries)` | Bulk register by short name |
 | `registerClassPaths(entries)` | Bulk register by class path |
 | `resolve(nameOrPath)` | Look up a constructor. Falls back to dynamic filesystem import. |
-| `create(nameOrPath, ctx, opts)` | Resolve + instantiate in one call |
+| `create(nameOrPath, ctx, opts)` | Resolve + instantiate in one call; omitted phase defaults to `task` |
 | `listRegistered()` | Return all registered names and class paths |
 
 **`TaskConstructor`**

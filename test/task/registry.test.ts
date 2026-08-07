@@ -8,7 +8,10 @@ class StubTask extends BaseTask {
     return 'stub';
   }
   async execute(): Promise<TaskResult> {
-    return { success: true, data: { ran: true } };
+    return {
+      success: true,
+      data: { ran: true, executionPhase: this.ctx.executionPhase },
+    };
   }
 }
 
@@ -34,6 +37,19 @@ describe('TaskRegistry', () => {
     expect(task).toBeInstanceOf(StubTask);
     const result = await task.run();
     expect(result.success).toBe(true);
+    expect(result.data?.executionPhase).toBe('task');
+  });
+
+  it('preserves a supplied execution phase without mutating the input context', async () => {
+    const reg = new TaskRegistry();
+    reg.register('my_task', Stub);
+    const ctx = { executionPhase: 'rollback' as const };
+
+    const task = await reg.create('my_task', ctx, {});
+    const result = await task.run();
+
+    expect(result.data?.executionPhase).toBe('rollback');
+    expect(ctx).toEqual({ executionPhase: 'rollback' });
   });
 
   it('lists all registered names and class paths', () => {
