@@ -1,19 +1,20 @@
 # Release notes
 
-## 0.14.0
+## 0.15.0
 
 Flowkit now exposes a generic execution-lifecycle contract on every task:
 
 ```typescript
-interface TaskContext {
-  readonly executionPhase:
-    | 'task'
-    | 'on_start'
-    | 'on_success'
-    | 'on_failure'
-    | 'finally'
-    | 'rollback';
-}
+type ExecutionPhase =
+  | 'task'
+  | 'on_start'
+  | 'on_success'
+  | 'on_failure'
+  | 'finally'
+  | 'rollback';
+
+// Inside a task:
+protected get executionPhase(): ExecutionPhase;
 ```
 
 The runner derives a fresh context for each invocation. Ordinary work,
@@ -22,12 +23,26 @@ tools, receives `task`; hooks and rollback invocations receive their matching
 phase. A nested flow or sub-agent cannot carry its caller's phase into its own
 ordinary work.
 
-This is additive for hosts: existing consumers do not need to change their
-runner context. Consumers that distinguish normal work from compensation or
-cleanup can read `ctx.executionPhase` inside a task.
+This is additive for hosts, including at the type level. `executionPhase` is
+**optional** on `TaskContext`, so a host context interface built on it stays
+constructible without naming a phase:
 
-`TaskRegistry.create()` continues to accept host-style context without an
-`executionPhase`; Flowkit derives `task` before construction. Code that calls
-`registry.resolve()` and directly instantiates the returned constructor should
-pass a complete `TaskContext`, for example `{ executionPhase: 'task', ...ctx }`,
-or use `registry.create()` when it wants Flowkit to supply the phase.
+```typescript
+interface FlowContext extends TaskContext, ToolContext {}
+const ctx: FlowContext = { bridge, project }; // still compiles
+```
+
+Making the field required would have broken every downstream context type that
+extends `TaskContext`, which is why it is not. Inside a task, read
+`this.executionPhase` rather than `this.ctx.executionPhase`: the accessor is
+typed `ExecutionPhase` with no `undefined`, because Flowkit resolves the value
+before any task observes it. `ResolvedTaskContext` names that resolved shape for
+code that needs the type directly.
+
+`TaskRegistry.create()` accepts host-style context without an `executionPhase`
+and derives `task` before construction. Code that calls `registry.resolve()` and
+directly instantiates the returned constructor gets the same defaulting from
+`BaseTask`, so it does not need to supply a phase either.
+
+Guard hosts are unaffected: `DiscoverTaskGuardsOptions.contextFor` returns
+`TaskContext`, unchanged from 0.14.0.
