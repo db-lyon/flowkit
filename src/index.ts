@@ -28,6 +28,7 @@ export { BaseTask } from './task/base-task.js';
 export type {
   TaskContext,
   TaskContextInput,
+  ResolvedTaskContext,
   ExecutionPhase,
   TaskResult,
   RollbackRecord,

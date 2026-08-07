@@ -17,8 +17,13 @@ import { resolveTaskCall } from './task-resolution.js';
  * host instead, e.g. `context: { cache: new Map() }`.
  */
 export interface TaskContext {
-  /** Lifecycle phase for this specific task invocation. */
-  readonly executionPhase: ExecutionPhase;
+  /**
+   * Lifecycle phase for this specific task invocation. Optional here because
+   * this is the shape a *host* builds, and Flowkit owns the value: the runner
+   * and `TaskRegistry.create` supply it before a task ever observes it. A
+   * running task reads it through `ResolvedTaskContext`, where it is required.
+   */
+  readonly executionPhase?: ExecutionPhase;
   logger?: Logger;
   registry?: TaskRegistry;
   /** LLM provider consumed by `AgentPromptTask` / `AgentTask`. */
@@ -75,11 +80,24 @@ export type ExecutionPhase =
   | 'rollback';
 
 /**
- * Host context accepted by runners and direct task construction. The lifecycle
- * phase is optional at this boundary because Flowkit owns and supplies it.
+ * Host context accepted by runners and direct task construction.
+ *
+ * An alias of `TaskContext`, named for the boundary it documents. It is not an
+ * `Omit<TaskContext, 'executionPhase'>`: `TaskContext` carries a string index
+ * signature, so `keyof` it is `string | number` and `Omit` would erase every
+ * named field, silently turning the host-facing surface into `{[k: string]:
+ * unknown}` and dropping all compile-time checking of `logger`, `llm`, and the
+ * rest.
  */
-export type TaskContextInput = Omit<TaskContext, 'executionPhase'> & {
-  readonly executionPhase?: ExecutionPhase;
+export type TaskContextInput = TaskContext;
+
+/**
+ * Context as a *running task* observes it: identical to `TaskContext` except
+ * the lifecycle phase is guaranteed present, because Flowkit resolved it during
+ * construction. This is the type of `BaseTask.ctx`.
+ */
+export type ResolvedTaskContext = TaskContext & {
+  readonly executionPhase: ExecutionPhase;
 };
 
 /**
@@ -102,6 +120,13 @@ export interface TaskResult {
 
 export abstract class BaseTask<TOpts = Record<string, unknown>> {
   protected logger: Logger;
+  /**
+   * Typed `TaskContext`, not `ResolvedTaskContext`, so a subclass can narrow it
+   * to the host's own context interface (which is built from `TaskContext` and
+   * so leaves the phase optional). The value is always phase-resolved at
+   * runtime; a task that needs the non-optional type can assert
+   * `ResolvedTaskContext`.
+   */
   protected ctx: TaskContext;
   protected options: TOpts;
 
@@ -110,6 +135,16 @@ export abstract class BaseTask<TOpts = Record<string, unknown>> {
     this.options = options;
     const parentLogger = this.ctx.logger ?? noopLogger;
     this.logger = parentLogger.child({ task: this.constructor.name });
+  }
+
+  /**
+   * Lifecycle phase for this invocation, always present. Read this rather than
+   * `ctx.executionPhase`: `ctx` is typed as the host-facing `TaskContext`, where
+   * the phase is optional so host context interfaces stay constructible, but
+   * Flowkit resolves it before any task observes it.
+   */
+  protected get executionPhase(): ExecutionPhase {
+    return (this.ctx as ResolvedTaskContext).executionPhase;
   }
 
   abstract get taskName(): string;

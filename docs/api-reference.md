@@ -155,14 +155,27 @@ type ExecutionPhase =
   | 'rollback';
 
 interface TaskContext {
-  readonly executionPhase: ExecutionPhase;
+  readonly executionPhase?: ExecutionPhase;
   logger?: Logger;
   [key: string]: unknown;
 }
 
-type TaskContextInput = Omit<TaskContext, 'executionPhase'> & {
-  readonly executionPhase?: ExecutionPhase;
+// Alias of TaskContext, named for the host boundary it documents.
+type TaskContextInput = TaskContext;
+
+// What a running task observes: Flowkit resolved the phase at construction.
+type ResolvedTaskContext = TaskContext & {
+  readonly executionPhase: ExecutionPhase;
 };
+```
+
+`executionPhase` is optional on `TaskContext` so that a host context interface
+built on it (`interface FlowContext extends TaskContext { ... }`) stays
+constructible without naming a phase Flowkit owns. Inside a task, read
+`this.executionPhase`, which is always resolved:
+
+```typescript
+protected get executionPhase(): ExecutionPhase;
 ```
 
 Each task receives a fresh context whose `executionPhase` identifies why that
@@ -282,10 +295,10 @@ type TaskConstructor = new (
 ) => BaseTask;
 ```
 
-`TaskRegistry.create()` accepts `TaskContextInput` and derives the complete
-invocation context before construction. `resolve()` returns the registered or
-dynamically loaded constructor itself; callers that instantiate a resolved
-constructor directly must pass a complete `TaskContext`.
+`TaskRegistry.create()` derives the complete invocation context before
+construction. `resolve()` returns the registered or dynamically loaded
+constructor itself; a caller that instantiates a resolved constructor directly
+gets the same defaulting from `BaseTask`, so it does not need to supply a phase.
 
 ---
 

@@ -23,7 +23,9 @@ class StubTask extends BaseTask {
 const Stub = StubTask as unknown as TaskConstructor;
 
 class ExplicitContextTask extends BaseTask {
-  private readonly observedPhase: ExecutionPhase;
+  // Optional: a host constructing this class directly may omit the phase. The
+  // assertions below cover the registry path, which always supplies it.
+  private readonly observedPhase: ExecutionPhase | undefined;
 
   constructor(ctx: TaskContext, options: Record<string, unknown>) {
     const observedPhase = ctx.executionPhase;

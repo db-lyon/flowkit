@@ -5,6 +5,7 @@ import {
   BaseTask,
   type ExecutionPhase,
   type TaskContext,
+  type ResolvedTaskContext,
   type TaskResult,
 } from '../../src/task/base-task.js';
 import type { LLMProvider } from '../../src/task/llm-provider.js';
@@ -32,7 +33,7 @@ class PhaseTask extends BaseTask<PhaseOptions> {
     const observations = this.ctx.observations as Observation[];
     observations.push({
       label: this.options.label,
-      phase: this.ctx.executionPhase,
+      phase: this.executionPhase,
       context: this.ctx,
     });
     if (this.options.mutatePhase) {
@@ -56,7 +57,7 @@ class CallingTask extends BaseTask<{ label: string }> {
   async execute(): Promise<TaskResult> {
     (this.ctx.observations as Observation[]).push({
       label: this.options.label,
-      phase: this.ctx.executionPhase,
+      phase: this.executionPhase,
       context: this.ctx,
     });
     return this.call('phase', { label: `${this.options.label}:child` });
@@ -221,7 +222,7 @@ describe('TaskContext.executionPhase', () => {
       .spyOn(AgentTask.prototype, 'execute')
       .mockImplementation(async function (this: AgentTask) {
         const instance = this as unknown as {
-          ctx: TaskContext & { observations: Observation[] };
+          ctx: ResolvedTaskContext & { observations: Observation[] };
           options: { system?: string };
         };
         instance.ctx.observations.push({

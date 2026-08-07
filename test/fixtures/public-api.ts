@@ -12,6 +12,7 @@ import type { FlowRunnerConfig as RootFlowRunnerConfig } from '@db-lyon/flowkit'
 import type { FlowRunnerConfig as FlowFlowRunnerConfig } from '@db-lyon/flowkit/flow';
 import type {
   ExecutionPhase as RootExecutionPhase,
+  ResolvedTaskContext as RootResolvedTaskContext,
   TaskConstructor as RootTaskConstructor,
   TaskContext as RootTaskContext,
   TaskContextInput as RootTaskContextInput,
@@ -19,6 +20,7 @@ import type {
 } from '@db-lyon/flowkit';
 import type {
   ExecutionPhase as TaskExecutionPhase,
+  ResolvedTaskContext as TaskResolvedTaskContext,
   TaskConstructor as TaskTaskConstructor,
   TaskContext as TaskTaskContext,
   TaskContextInput as TaskTaskContextInput,
@@ -72,10 +74,20 @@ const explicitTaskContextRegistry = new TaskTaskRegistry().register(
   ExplicitContextTask,
 );
 
-declare const rootContext: RootTaskContext;
-declare const taskContext: TaskTaskContext;
+// A running task observes a resolved phase: Flowkit supplied it at construction.
+declare const rootContext: RootResolvedTaskContext;
+declare const taskContext: TaskResolvedTaskContext;
 const rootContextPhase: RootExecutionPhase = rootContext.executionPhase;
 const taskContextPhase: TaskExecutionPhase = taskContext.executionPhase;
+
+// A host builds and extends `TaskContext` without ever naming a phase, and an
+// interface extending it stays constructible. This is the ue-mcp `FlowContext`
+// shape; requiring the phase here would break every downstream context type.
+interface HostFlowContext extends RootTaskContext {
+  bridge: { call(method: string): Promise<unknown> };
+}
+const hostContext: HostFlowContext = { bridge: { call: async () => null } };
+const hostTaskContext: TaskTaskContext = {};
 const rootRunnerContext: RootFlowRunnerConfig['context'] = {};
 const flowRunnerContext: FlowFlowRunnerConfig['context'] = {};
 
@@ -117,6 +129,8 @@ void explicitContextRegistry;
 void explicitTaskContextRegistry;
 void rootContextPhase;
 void taskContextPhase;
+void hostContext;
+void hostTaskContext;
 void rootRunnerContext;
 void flowRunnerContext;
 void invalidPhase;

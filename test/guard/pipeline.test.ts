@@ -28,13 +28,13 @@ describe('runGuarded', () => {
   });
 
   it('runs before hooks with the host context', async () => {
-    const before = vi.fn(async () => {});
+    const before = vi.fn(async (_ctx: Ctx) => {});
     const ctx = makeCtx('save', ['/a.uasset']);
     await runGuarded(ctx, registryOf({ name: 'sc', before }), async () => 1);
 
     expect(before).toHaveBeenCalledTimes(1);
-    expect(before.mock.calls[0][0].method).toBe('save');
-    expect(before.mock.calls[0][0].files()).toEqual(['/a.uasset']);
+    expect(before.mock.calls[0]![0].method).toBe('save');
+    expect(before.mock.calls[0]![0].files()).toEqual(['/a.uasset']);
   });
 
   it('skips a guard whose appliesTo is false', async () => {

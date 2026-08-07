@@ -1,7 +1,7 @@
 import { describe, it, expect, vi } from 'vitest';
 import { TaskRegistry, type TaskConstructor } from '../../src/task/registry.js';
 import { BaseTask, type TaskResult } from '../../src/task/base-task.js';
-import { discoverTaskGuards } from '../../src/guard/task-guards.js';
+import { discoverTaskGuards, type GuardTaskFailure } from '../../src/guard/task-guards.js';
 import { GuardRegistry } from '../../src/guard/registry.js';
 import { runGuarded } from '../../src/guard/pipeline.js';
 import { guardContextBase, lazy, type GuardContext } from '../../src/guard/types.js';
@@ -28,7 +28,7 @@ function taskReturning(result: TaskResult | (() => never), label: string): TaskC
     async execute(): Promise<TaskResult> {
       seen.push({ task: label, options: this.options as Record<string, unknown> });
       if (typeof result === 'function') result();
-      return result;
+      return result as TaskResult;
     }
   }
   return Stub as unknown as TaskConstructor;
@@ -169,12 +169,12 @@ describe('task guard denial', () => {
         throw new Error('p4 daemon unreachable');
       }, 'p4'),
     );
-    const onDeny = vi.fn(() => new Error('mapped'));
+    const onDeny = vi.fn((_info: GuardTaskFailure<Ctx>) => new Error('mapped'));
     const [guard] = discover(reg, { onDeny });
 
     await expect(guard.before!(makeCtx('save'))).rejects.toThrow('mapped');
     expect(onDeny).toHaveBeenCalledTimes(1);
-    expect(onDeny.mock.calls[0][0]).toMatchObject({
+    expect(onDeny.mock.calls[0]![0]).toMatchObject({
       guard: 'p4',
       phase: 'before',
       taskName: 'guard.p4.before',
