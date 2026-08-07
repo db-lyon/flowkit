@@ -4,10 +4,46 @@ import type { Guard as RootGuard, GuardContext } from '@db-lyon/flowkit';
 import type { Guard as GuardGuard } from '@db-lyon/flowkit/guard';
 import { GuardRegistry, runGuarded, guardContextBase } from '@db-lyon/flowkit/guard';
 import { GuardRegistry as RootGuardRegistry } from '@db-lyon/flowkit';
+import { ShellTask as RootShellTask } from '@db-lyon/flowkit';
+import { ShellTask as TaskShellTask } from '@db-lyon/flowkit/task';
+import type {
+  ExecutionPhase as RootExecutionPhase,
+  TaskContext as RootTaskContext,
+  TaskContextInput as RootTaskContextInput,
+} from '@db-lyon/flowkit';
+import type {
+  ExecutionPhase as TaskExecutionPhase,
+  TaskContext as TaskTaskContext,
+  TaskContextInput as TaskTaskContextInput,
+} from '@db-lyon/flowkit/task';
 
 const signal = new AbortController().signal;
 const rootOptions: RootShellTaskOptions = { command: 'echo root', signal };
 const taskOptions: TaskShellTaskOptions = { command: 'echo task', signal };
+const rootTask = new RootShellTask({}, rootOptions);
+const taskTask = new TaskShellTask({}, taskOptions);
+const phases: RootExecutionPhase[] = [
+  'task',
+  'on_start',
+  'on_success',
+  'on_failure',
+  'finally',
+  'rollback',
+];
+const taskPhase: TaskExecutionPhase = 'task';
+const rootInput: RootTaskContextInput = {};
+const taskInput: TaskTaskContextInput = {};
+
+declare const rootContext: RootTaskContext;
+declare const taskContext: TaskTaskContext;
+const rootContextPhase: RootExecutionPhase = rootContext.executionPhase;
+const taskContextPhase: TaskExecutionPhase = taskContext.executionPhase;
+
+// The lifecycle value is observable but runner-owned and read-only.
+// @ts-expect-error executionPhase cannot be mutated by a task.
+rootContext.executionPhase = 'rollback';
+// @ts-expect-error executionPhase cannot be mutated through the task subpath either.
+taskContext.executionPhase = 'finally';
 
 // The root and the ./guard subpath must describe the same guard, so a host can
 // import from either without the two drifting into incompatible shapes.
@@ -24,3 +60,11 @@ const run = runGuarded(guardContextBase(), registry, async () => 'ok');
 void rootOptions;
 void taskOptions;
 void run;
+void rootTask;
+void taskTask;
+void phases;
+void taskPhase;
+void rootInput;
+void taskInput;
+void rootContextPhase;
+void taskContextPhase;

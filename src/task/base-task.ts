@@ -17,6 +17,8 @@ import { resolveTaskCall } from './task-resolution.js';
  * host instead, e.g. `context: { cache: new Map() }`.
  */
 export interface TaskContext {
+  /** Lifecycle phase for this specific task invocation. */
+  readonly executionPhase: ExecutionPhase;
   logger?: Logger;
   registry?: TaskRegistry;
   /** LLM provider consumed by `AgentPromptTask` / `AgentTask`. */
@@ -63,6 +65,23 @@ export interface TaskContext {
   [key: string]: unknown;
 }
 
+/** Public lifecycle phases assigned by `FlowRunner` to each task invocation. */
+export type ExecutionPhase =
+  | 'task'
+  | 'on_start'
+  | 'on_success'
+  | 'on_failure'
+  | 'finally'
+  | 'rollback';
+
+/**
+ * Host context accepted by runners and direct task construction. The lifecycle
+ * phase is optional at this boundary because Flowkit owns and supplies it.
+ */
+export type TaskContextInput = Omit<TaskContext, 'executionPhase'> & {
+  readonly executionPhase?: ExecutionPhase;
+};
+
 /**
  * Rollback record returned by a successful mutation task.
  * The runner invokes `taskName` with `payload` (in reverse step order)
@@ -83,12 +102,13 @@ export interface TaskResult {
 
 export abstract class BaseTask<TOpts = Record<string, unknown>> {
   protected logger: Logger;
+  protected ctx: TaskContext;
+  protected options: TOpts;
 
-  constructor(
-    protected ctx: TaskContext,
-    protected options: TOpts,
-  ) {
-    const parentLogger = ctx.logger ?? noopLogger;
+  constructor(ctx: TaskContextInput, options: TOpts) {
+    this.ctx = { ...ctx, executionPhase: ctx.executionPhase ?? 'task' };
+    this.options = options;
+    const parentLogger = this.ctx.logger ?? noopLogger;
     this.logger = parentLogger.child({ task: this.constructor.name });
   }
 
@@ -107,6 +127,8 @@ export abstract class BaseTask<TOpts = Record<string, unknown>> {
    * default options as an ordinary flow step or an agent tool, including
    * `${ns.path}` interpolation of those defaults. `options` are this task's own
    * runtime data and stay literal (see `resolveTaskCall`).
+   * The child receives a fresh context with the ordinary `task` phase while
+   * retaining the caller's host services and reference scope.
    *
    * Returns an unexecuted task instance — call `.run()` on it yourself when you
    * need to inspect or configure the task before running.
@@ -128,12 +150,13 @@ export abstract class BaseTask<TOpts = Record<string, unknown>> {
       options,
       this.ctx.taskReferenceContext,
     );
-    return registry.create(resolved.classPath, this.ctx, resolved.options) as Promise<T>;
+    const childCtx: TaskContext = { ...this.ctx, executionPhase: 'task' };
+    return registry.create(resolved.classPath, childCtx, resolved.options) as Promise<T>;
   }
 
   /**
    * Resolve and execute another task by name in a single call.
-   * The resolved task shares this task's context (bridge, project, etc.).
+   * The resolved task shares the caller's host services through a fresh context.
    */
   protected async call(
     taskName: string,

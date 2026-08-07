@@ -1,5 +1,11 @@
 export { BaseTask } from './base-task.js';
-export type { TaskContext, TaskResult, RollbackRecord } from './base-task.js';
+export type {
+  TaskContext,
+  TaskContextInput,
+  ExecutionPhase,
+  TaskResult,
+  RollbackRecord,
+} from './base-task.js';
 export { ShellTask } from './shell-task.js';
 export type { ShellTaskOptions } from './shell-task.js';
 export { TaskRegistry } from './registry.js';

@@ -125,7 +125,7 @@ abstract class BaseTask<TOpts = Record<string, unknown>> {
   protected options: TOpts;
   protected logger: Logger;
 
-  constructor(ctx: TaskContext, options: TOpts);
+  constructor(ctx: TaskContextInput, options: TOpts);
 
   abstract get taskName(): string;
   abstract execute(): Promise<TaskResult>;
@@ -146,13 +146,33 @@ abstract class BaseTask<TOpts = Record<string, unknown>> {
 ### `TaskContext`
 
 ```typescript
+type ExecutionPhase =
+  | 'task'
+  | 'on_start'
+  | 'on_success'
+  | 'on_failure'
+  | 'finally'
+  | 'rollback';
+
 interface TaskContext {
+  readonly executionPhase: ExecutionPhase;
   logger?: Logger;
   [key: string]: unknown;
 }
+
+type TaskContextInput = Omit<TaskContext, 'executionPhase'> & {
+  readonly executionPhase?: ExecutionPhase;
+};
 ```
 
-Shared context passed to every task. Add any properties you need (database connections, API clients, etc.).
+Each task receives a fresh context whose `executionPhase` identifies why that
+specific invocation is running. Ordinary steps, nested-flow steps, direct
+`runTask` calls, task-to-task calls, and agent/tool work use `task`. Hook tasks
+use their named phase, and rollback-record invocations use `rollback`.
+
+Hosts continue to pass their shared services through `FlowRunnerConfig.context`
+without setting a phase. Flowkit owns the field and derives it per invocation;
+tasks should only read it.
 
 ---
 
@@ -292,7 +312,7 @@ interface FlowRunnerConfig {
   tasks: Record<string, TaskDefinition>;
   flows: Record<string, FlowDefinition>;
   registry: TaskRegistry;
-  context: TaskContext;
+  context: TaskContextInput;
   hooks?: FlowRunnerHooks;
   logger?: Logger;
 }
