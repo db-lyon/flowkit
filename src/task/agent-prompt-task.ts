@@ -5,10 +5,11 @@ import {
   pickRunOptions,
   StructuredOutputError,
   type AgentRunFields,
+  type AgentRetryOptions,
 } from './llm-runner.js';
 import { preview } from './redact.js';
 
-export interface AgentPromptOptions extends AgentRunFields {
+export interface AgentPromptOptions extends AgentRunFields, AgentRetryOptions {
   /** User prompt. Required. */
   prompt: string;
   /** System prompt / instructions. */
@@ -80,6 +81,7 @@ export class AgentPromptTask extends BaseTask<AgentPromptOptions> {
           maxTokens: this.options.maxTokens,
           temperature: this.options.temperature,
           schema: this.options.schema,
+          signal: this.ctx.signal,
         },
         pickRunOptions(this.options),
         this.logger,

@@ -1,8 +1,9 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import { AgentTask } from '../../src/task/agent-task.js';
 import { BaseTask, type TaskResult, type TaskContext } from '../../src/task/base-task.js';
 import { TaskRegistry } from '../../src/task/registry.js';
 import type { LLMProvider, LLMCompletionResponse } from '../../src/task/llm-provider.js';
+import type { Logger } from '../../src/logger.js';
 
 /** Provider that returns a scripted sequence of responses. */
 function scripted(responses: LLMCompletionResponse[]): { provider: LLMProvider; count: () => number } {
@@ -45,6 +46,174 @@ function makeTask(opts: Record<string, unknown>, ctx: Partial<TaskContext>) {
 }
 
 describe('AgentTask', () => {
+  it('does not retry a provider error when host retryOn returns false', async () => {
+    let attempts = 0;
+    const provider: LLMProvider = {
+      async complete() {
+        attempts++;
+        throw new Error('not retryable');
+      },
+    };
+
+    const result = await makeTask(
+      { prompt: 'x', retries: 2, retryDelay: 0, retryOn: () => false },
+      { llm: provider },
+    ).run();
+
+    expect(result.success).toBe(false);
+    expect(attempts).toBe(1);
+  });
+
+  it('retries a provider error when host retryOn returns true', async () => {
+    let attempts = 0;
+    const provider: LLMProvider = {
+      async complete() {
+        attempts++;
+        throw new Error('retryable');
+      },
+    };
+
+    const result = await makeTask(
+      { prompt: 'x', retries: 2, retryDelay: 0, retryOn: () => true },
+      { llm: provider },
+    ).run();
+
+    expect(result.success).toBe(false);
+    expect(attempts).toBe(3);
+  });
+
+  it('retries all provider errors by default when retryOn is omitted', async () => {
+    let attempts = 0;
+    const provider: LLMProvider = {
+      async complete() {
+        attempts++;
+        throw new Error('default retryable');
+      },
+    };
+
+    const result = await makeTask({ prompt: 'x', retries: 2, retryDelay: 0 }, { llm: provider }).run();
+
+    expect(result.success).toBe(false);
+    expect(attempts).toBe(3);
+  });
+
+  it('uses retryOn for the structured final-answer completion path', async () => {
+    let attempts = 0;
+    const provider: LLMProvider = {
+      async complete() {
+        attempts++;
+        if (attempts === 1) return finalTurn('not json');
+        throw new Error('do not retry finalizer');
+      },
+    };
+
+    const result = await makeTask(
+      {
+        prompt: 'x',
+        retries: 2,
+        retryDelay: 0,
+        retryOn: () => false,
+        schema: { type: 'object', required: ['ok'] },
+      },
+      { llm: provider },
+    ).run();
+
+    expect(result.success).toBe(false);
+    expect(attempts).toBe(2);
+  });
+
+  it('forwards task cancellation to every normal and structured completion turn', async () => {
+    const controller = new AbortController();
+    const signals: Array<AbortSignal | undefined> = [];
+    let attempts = 0;
+    const provider: LLMProvider = {
+      async complete(req) {
+        signals.push(req.signal);
+        attempts++;
+        return attempts === 1 ? finalTurn('not json') : finalTurn('{"ok":true}');
+      },
+    };
+
+    const result = await makeTask(
+      { prompt: 'x', schema: { type: 'object', required: ['ok'] } },
+      { llm: provider, signal: controller.signal },
+    ).run();
+
+    expect(result.success).toBe(true);
+    expect(signals).toHaveLength(2);
+    expect(signals.every((signal) => signal !== undefined)).toBe(true);
+  });
+
+  it('does not call its provider when the task signal is already aborted', async () => {
+    const controller = new AbortController();
+    controller.abort();
+    let attempts = 0;
+    const provider: LLMProvider = { async complete() { attempts++; return finalTurn('unexpected'); } };
+
+    const result = await makeTask({ prompt: 'x' }, { llm: provider, signal: controller.signal }).run();
+
+    expect(result.success).toBe(false);
+    expect(attempts).toBe(0);
+  });
+
+  it('cancels retry backoff without a later AgentTask provider attempt and cleans listeners', async () => {
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, 'addEventListener');
+    const remove = vi.spyOn(controller.signal, 'removeEventListener');
+    let attempts = 0;
+    let markBackoffStarted!: () => void;
+    const backoffStarted = new Promise<void>((resolve) => { markBackoffStarted = resolve; });
+    const logger: Logger = {
+      debug: () => {}, info: () => {}, warn: () => markBackoffStarted(), error: () => {}, child: () => logger,
+    };
+    const provider: LLMProvider = {
+      async complete() {
+        attempts++;
+        throw new Error('retryable');
+      },
+    };
+
+    const completion = makeTask(
+      { prompt: 'x', retries: 2, retryDelay: 10_000 },
+      { llm: provider, signal: controller.signal, logger } as TaskContext,
+    ).run();
+    await backoffStarted;
+    controller.abort();
+
+    await expect(completion).resolves.toMatchObject({ success: false, error: { name: 'LLMAbortError' } });
+    expect(attempts).toBe(1);
+    expect(add.mock.calls.filter(([event]) => event === 'abort')).toHaveLength(2);
+    expect(remove.mock.calls.filter(([event]) => event === 'abort')).toHaveLength(2);
+  });
+
+  it('cancels an in-flight structured finalization through the task signal', async () => {
+    const controller = new AbortController();
+    let attempts = 0;
+    let finalizationStarted!: () => void;
+    const finalization = new Promise<void>((resolve) => { finalizationStarted = resolve; });
+    const provider: LLMProvider = {
+      complete(req) {
+        attempts++;
+        if (attempts === 1) return Promise.resolve(finalTurn('not json'));
+        finalizationStarted();
+        return new Promise<LLMCompletionResponse>((resolve) => {
+          req.signal?.addEventListener('abort', () => resolve(finalTurn('{"ok":true}')), { once: true });
+        });
+      },
+    };
+
+    const task = makeTask(
+      { prompt: 'x', schema: { type: 'object', required: ['ok'] }, repairAttempts: 1 },
+      { llm: provider, signal: controller.signal },
+    );
+    const result = task.run();
+    await finalization;
+    controller.abort();
+
+    await expect(result).resolves.toMatchObject({ success: false });
+    expect(attempts).toBe(2);
+  });
+
   it('returns a final answer with no tools', async () => {
     const { provider } = scripted([finalTurn('done')]);
     const task = makeTask({ prompt: 'hi' }, { llm: provider });

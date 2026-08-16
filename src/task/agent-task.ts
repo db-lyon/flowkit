@@ -12,6 +12,7 @@ import {
   coerceStructured,
   StructuredOutputError,
   type AgentRunFields,
+  type AgentRetryOptions,
 } from './llm-runner.js';
 import { validateJson, formatErrors } from './json-schema.js';
 import { preview, truncate } from './redact.js';
@@ -52,7 +53,7 @@ export interface AgentToolSpec {
   parameters?: Record<string, unknown>;
 }
 
-export interface AgentTaskOptions extends AgentRunFields {
+export interface AgentTaskOptions extends AgentRunFields, AgentRetryOptions {
   /** Initial user prompt / task for the agent. Required. */
   prompt: string;
   /** System prompt / instructions. */
@@ -227,6 +228,7 @@ export class AgentTask extends BaseTask<AgentTaskOptions> {
             temperature,
             tools: toolDefs.length > 0 ? toolDefs : undefined,
             toolChoice: toolDefs.length > 0 ? 'auto' : undefined,
+            signal: this.ctx.signal,
           },
           runOpts,
           this.logger,
@@ -411,6 +413,7 @@ export class AgentTask extends BaseTask<AgentTaskOptions> {
         maxTokens: this.options.maxTokens,
         temperature: this.options.temperature,
         schema,
+        signal: this.ctx.signal,
       },
       runOpts,
       this.logger,

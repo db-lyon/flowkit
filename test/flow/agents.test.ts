@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi } from 'vitest';
 import {
   FlowRunner,
   type NestedAgentTaskFactory,
@@ -9,6 +9,7 @@ import { AgentTask } from '../../src/task/agent-task.js';
 import type { LLMProvider } from '../../src/task/llm-provider.js';
 import type { AgentDefinition } from '../../src/config/schema.js';
 import type { AgentTaskOptions } from '../../src/task/agent-task.js';
+import type { Logger } from '../../src/logger.js';
 
 class EchoTask extends BaseTask<Record<string, unknown>> {
   get taskName() { return 'echo'; }
@@ -58,6 +59,230 @@ function runner(
 }
 
 describe('FlowRunner agents', () => {
+  it('preserves a host retry predicate through direct runTask agent resolution', async () => {
+    let attempts = 0;
+    const provider: LLMProvider = {
+      async complete() {
+        attempts++;
+        throw new Error('host-classified non-retryable failure');
+      },
+    };
+    const r = runner({ worker: { system: 'WORKER' } as never }, {}, {}, provider);
+
+    const result = await r.runTask('worker', {
+      prompt: 'go',
+      retries: 2,
+      retryDelay: 0,
+      retryOn: () => false,
+    });
+
+    expect(result.success).toBe(false);
+    expect(attempts).toBe(1);
+  });
+
+  it('ignores a configured scalar retryOn for a raw agent task definition', async () => {
+    let attempts = 0;
+    const failure = new Error('provider failure');
+    const provider: LLMProvider = {
+      async complete() {
+        attempts++;
+        throw failure;
+      },
+    };
+    const registry = new TaskRegistry().register('agent', AgentTask as never);
+    const r = new FlowRunner({
+      tasks: {
+        worker: {
+          class_path: 'agent',
+          options: {
+            system: 'WORKER',
+            prompt: 'go',
+            retries: 1,
+            retryDelay: 0,
+            // Task definitions originate in plain-data config; this must retain
+            // the pre-0.17 default rather than becoming a callable predicate.
+            retryOn: 'transient',
+          },
+        },
+      } as never,
+      flows: {} as never,
+      registry,
+      context: { llm: provider },
+    });
+
+    const result = await r.runTask('worker');
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe(failure);
+    expect(attempts).toBe(2);
+  });
+
+  it('lets a nested-agent factory supply a host retry predicate', async () => {
+    let coordAttempts = 0;
+    let workerAttempts = 0;
+    const provider: LLMProvider = {
+      async complete(req) {
+        if ((req.system ?? '').includes('WORKER')) {
+          workerAttempts++;
+          throw new Error('host-classified non-retryable failure');
+        }
+        coordAttempts++;
+        return coordAttempts === 1
+          ? { text: '', finishReason: 'tool_use', toolCalls: [{ id: '1', name: 'worker', arguments: { prompt: 'sub' } }] }
+          : { text: 'coord-done', finishReason: 'stop' };
+      },
+    };
+    const factory: NestedAgentTaskFactory = (ctx, options) =>
+      new AgentTask(ctx, { ...options, retries: 2, retryDelay: 0, retryOn: () => false });
+    const r = new FlowRunner({
+      tasks: {} as never,
+      flows: { main: { steps: { 1: { task: 'coord', options: { prompt: 'go' } } } } } as never,
+      agents: {
+        coord: { system: 'COORD', tools: [{ agent: 'worker' }], budget: { tokenBudget: 100000 } },
+        worker: { system: 'WORKER' },
+      } as never,
+      registry: new TaskRegistry(),
+      context: { llm: provider },
+      nestedAgentTaskFactory: factory,
+    });
+
+    const result = await r.run({ flowName: 'main' });
+
+    expect(result.success).toBe(true);
+    expect(workerAttempts).toBe(1);
+    const toolCalls = result.steps[0]?.result?.data?.toolCalls as Array<{ ok: boolean }>;
+    expect(toolCalls[0]?.ok).toBe(false);
+  });
+
+  it('forwards the run signal to a nested configured agent', async () => {
+    const controller = new AbortController();
+    let coordinatorAttempts = 0;
+    let workerAttempts = 0;
+    let workerSignal: AbortSignal | undefined;
+    let markWorkerStarted!: () => void;
+    const workerStarted = new Promise<void>((resolve) => { markWorkerStarted = resolve; });
+    const provider: LLMProvider = {
+      complete(req) {
+        if ((req.system ?? '').includes('WORKER')) {
+          workerAttempts++;
+          workerSignal = req.signal;
+          markWorkerStarted();
+          return new Promise((resolve) => req.signal?.addEventListener('abort', () => resolve({ text: 'late', finishReason: 'stop' }), { once: true }));
+        }
+        coordinatorAttempts++;
+        return Promise.resolve(coordinatorAttempts === 1
+          ? { text: '', finishReason: 'tool_use', toolCalls: [{ id: '1', name: 'worker', arguments: { prompt: 'sub' } }] }
+          : { text: 'coord-done', finishReason: 'stop' });
+      },
+    };
+    const r = new FlowRunner({
+      tasks: {} as never,
+      flows: { main: { steps: { 1: { task: 'coord', options: { prompt: 'go' } } } } } as never,
+      agents: {
+        coord: { system: 'COORD', tools: [{ agent: 'worker' }], budget: { tokenBudget: 100000 } },
+        worker: { system: 'WORKER' },
+      } as never,
+      registry: new TaskRegistry(),
+      context: { llm: provider, signal: controller.signal },
+      nestedAgentTaskFactory: (ctx, options) => new AgentTask(ctx, options),
+    });
+
+    const resultPromise = r.run({ flowName: 'main' });
+    await workerStarted;
+    controller.abort();
+    const result = await resultPromise;
+
+    expect(workerAttempts).toBe(1);
+    expect(workerSignal?.aborted).toBe(true);
+    expect(result.success).toBe(false);
+  });
+
+  it('cancels nested configured-agent retry backoff without a later provider attempt', async () => {
+    const controller = new AbortController();
+    const add = vi.spyOn(controller.signal, 'addEventListener');
+    const remove = vi.spyOn(controller.signal, 'removeEventListener');
+    let coordinatorAttempts = 0;
+    let workerAttempts = 0;
+    let markBackoffStarted!: () => void;
+    const backoffStarted = new Promise<void>((resolve) => { markBackoffStarted = resolve; });
+    const logger: Logger = {
+      debug: () => {}, info: () => {}, warn: () => markBackoffStarted(), error: () => {}, child: () => logger,
+    };
+    const provider: LLMProvider = {
+      async complete(req) {
+        if ((req.system ?? '').includes('WORKER')) {
+          workerAttempts++;
+          throw new Error('retryable worker failure');
+        }
+        coordinatorAttempts++;
+        return coordinatorAttempts === 1
+          ? { text: '', finishReason: 'tool_use', toolCalls: [{ id: '1', name: 'worker', arguments: { prompt: 'sub' } }] }
+          : { text: 'coord-done', finishReason: 'stop' };
+      },
+    };
+    const r = new FlowRunner({
+      tasks: {} as never,
+      flows: { main: { steps: { 1: { task: 'coord', options: { prompt: 'go' } } } } } as never,
+      agents: {
+        coord: { system: 'COORD', tools: [{ agent: 'worker' }], budget: { tokenBudget: 100000 } },
+        worker: { system: 'WORKER' },
+      } as never,
+      registry: new TaskRegistry(),
+      context: { llm: provider, signal: controller.signal, logger },
+      nestedAgentTaskFactory: (ctx, options) => new AgentTask(ctx, { ...options, retries: 2, retryDelay: 10_000 }),
+    });
+
+    const completion = r.run({ flowName: 'main' });
+    await backoffStarted;
+    controller.abort();
+
+    await expect(completion).resolves.toMatchObject({ success: false });
+    expect(workerAttempts).toBe(1);
+    expect(add.mock.calls.filter(([event]) => event === 'abort')).toHaveLength(3);
+    expect(remove.mock.calls.filter(([event]) => event === 'abort')).toHaveLength(3);
+  });
+
+  it('applies a factory retry predicate to a nested configured-agent structured repair', async () => {
+    let coordinatorAttempts = 0;
+    let workerAttempts = 0;
+    const provider: LLMProvider = {
+      async complete(req) {
+        if ((req.system ?? '').includes('WORKER')) {
+          workerAttempts++;
+          if (workerAttempts === 1) return { text: 'not json', finishReason: 'stop' };
+          throw new Error('do not retry nested repair');
+        }
+        coordinatorAttempts++;
+        return coordinatorAttempts === 1
+          ? { text: '', finishReason: 'tool_use', toolCalls: [{ id: '1', name: 'worker', arguments: { prompt: 'sub' } }] }
+          : { text: 'coord-done', finishReason: 'stop' };
+      },
+    };
+    const r = new FlowRunner({
+      tasks: {} as never,
+      flows: { main: { steps: { 1: { task: 'coord', options: { prompt: 'go' } } } } } as never,
+      agents: {
+        coord: { system: 'COORD', tools: [{ agent: 'worker' }], budget: { tokenBudget: 100000 } },
+        worker: { system: 'WORKER', schema: { type: 'object', required: ['ok'] } },
+      } as never,
+      registry: new TaskRegistry(),
+      context: { llm: provider },
+      nestedAgentTaskFactory: (ctx, options) => new AgentTask(ctx, {
+        ...options,
+        retries: 2,
+        retryDelay: 0,
+        retryOn: () => false,
+      }),
+    });
+
+    const result = await r.run({ flowName: 'main' });
+
+    expect(result.success).toBe(true);
+    expect(workerAttempts).toBe(2);
+    const toolCalls = result.steps[0]?.result?.data?.toolCalls as Array<{ ok: boolean }>;
+    expect(toolCalls[0]?.ok).toBe(false);
+  });
+
   it('runs an agent as a flow step', async () => {
     const r = runner(
       { builder: { system: 'BUILDER', tools: [] } as never },

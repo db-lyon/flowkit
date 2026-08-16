@@ -58,12 +58,25 @@ export interface AgentRunFields {
   maxOutputChars?: number;
 }
 
+/**
+ * Programmatic-only retry control for agent tasks. This deliberately stays out
+ * of `AgentRunFields`, whose members remain safe to declare in YAML.
+ */
+export interface AgentRetryOptions {
+  /** Decide whether a thrown provider error is retryable. Default: retry all errors. */
+  retryOn?: (err: Error) => boolean;
+}
+
 /** Lift the run-control fields out of a task's options into `LLMRunOptions`. */
-export function pickRunOptions(o: AgentRunFields): LLMRunOptions {
+export function pickRunOptions(o: AgentRunFields & AgentRetryOptions): LLMRunOptions {
   const out: LLMRunOptions = {};
   if (o.timeout !== undefined) out.timeout = o.timeout;
   if (o.retries !== undefined) out.retries = o.retries;
   if (o.retryDelay !== undefined) out.retryDelay = o.retryDelay;
+  // Raw task options can originate in YAML, whose permissive task-option
+  // record may contain a scalar named `retryOn`. Only programmatic functions
+  // participate in the host-only LLM retry predicate contract.
+  if (typeof o.retryOn === 'function') out.retryOn = o.retryOn;
   if (o.repairAttempts !== undefined) out.repairAttempts = o.repairAttempts;
   if (o.maxOutputChars !== undefined) out.maxOutputChars = o.maxOutputChars;
   return out;
@@ -74,6 +87,14 @@ export class LLMTimeoutError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'LLMTimeoutError';
+  }
+}
+
+/** The caller cancelled an LLM completion before it could finish. */
+export class LLMAbortError extends Error {
+  constructor(message = 'LLM call aborted') {
+    super(message);
+    this.name = 'LLMAbortError';
   }
 }
 
@@ -163,10 +184,15 @@ async function callWithRetry(
 ): Promise<LLMCompletionResponse> {
   let lastErr: Error = new Error('LLM call never executed');
   for (let attempt = 0; attempt <= cfg.retries; attempt++) {
+    throwIfAborted(req.signal);
     try {
       return await callOnce(provider, req, cfg.timeout);
     } catch (err) {
       lastErr = err instanceof Error ? err : new Error(String(err));
+      // `callOnce` records cancellation as LLMAbortError at the attempt
+      // boundary. Do not re-read the mutable request signal here: a later
+      // abort must not rewrite a timeout or provider error that already won.
+      if (lastErr instanceof LLMAbortError) throw lastErr;
       const canRetry = attempt < cfg.retries && (cfg.retryOn ? cfg.retryOn(lastErr) : true);
       if (!canRetry) break;
       const delay = cfg.retryDelay * 2 ** attempt;
@@ -174,7 +200,7 @@ async function callWithRetry(
         { attempt: attempt + 1, nextDelayMs: delay, error: lastErr.message },
         'LLM call failed; retrying',
       );
-      await sleep(delay);
+      await sleep(delay, req.signal);
     }
   }
   throw lastErr;
@@ -185,41 +211,79 @@ async function callOnce(
   req: LLMCompletionRequest,
   timeout: number,
 ): Promise<LLMCompletionResponse> {
-  if (!timeout || timeout <= 0) return provider.complete(req);
+  throwIfAborted(req.signal);
+
+  if (!timeout || timeout <= 0) return callProvider(provider, req, req.signal);
 
   const controller = new AbortController();
-  const signal = req.signal ? anySignal([req.signal, controller.signal]) : controller.signal;
+  const combined = combineSignals([req.signal, controller.signal]);
+  const { signal } = combined;
 
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeoutPromise = new Promise<never>((_, reject) => {
     timer = setTimeout(() => {
-      controller.abort();
       reject(new LLMTimeoutError(`LLM call timed out after ${timeout}ms`));
+      controller.abort();
     }, timeout);
   });
 
   try {
-    return await Promise.race([provider.complete({ ...req, signal }), timeoutPromise]);
+    return await Promise.race([callProvider(provider, { ...req, signal }, signal), timeoutPromise]);
   } finally {
     if (timer) clearTimeout(timer);
+    combined.cleanup();
   }
 }
 
-/** Combine abort signals — aborts when any input aborts. (Node-version safe.) */
-function anySignal(signals: AbortSignal[]): AbortSignal {
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new LLMAbortError();
+}
+
+/** Await a provider while also observing cancellation, even if it ignores the signal. */
+async function callProvider(
+  provider: LLMProvider,
+  request: LLMCompletionRequest,
+  signal: AbortSignal | undefined,
+): Promise<LLMCompletionResponse> {
+  throwIfAborted(signal);
+  if (!signal) return provider.complete(request);
+
+  let removeAbortListener: (() => void) | undefined;
+  const aborted = new Promise<never>((_, reject) => {
+    const onAbort = () => reject(new LLMAbortError());
+    signal.addEventListener('abort', onAbort, { once: true });
+    removeAbortListener = () => signal.removeEventListener('abort', onAbort);
+  });
+  try {
+    return await Promise.race([provider.complete(request), aborted]);
+  } finally {
+    removeAbortListener?.();
+  }
+}
+
+/** Combine abort signals and expose deterministic listener cleanup. */
+function combineSignals(signals: Array<AbortSignal | undefined>): {
+  signal: AbortSignal;
+  cleanup: () => void;
+} {
+  const inputs = signals.filter((signal): signal is AbortSignal => signal !== undefined);
   const controller = new AbortController();
+  if (inputs.some((signal) => signal.aborted)) {
+    controller.abort();
+    return { signal: controller.signal, cleanup: () => {} };
+  }
+  let cleaned = false;
   const onAbort = () => {
     controller.abort();
-    for (const s of signals) s.removeEventListener('abort', onAbort);
+    cleanup();
   };
-  for (const s of signals) {
-    if (s.aborted) {
-      controller.abort();
-      break;
-    }
-    s.addEventListener('abort', onAbort, { once: true });
-  }
-  return controller.signal;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    for (const input of inputs) input.removeEventListener('abort', onAbort);
+  };
+  for (const input of inputs) input.addEventListener('abort', onAbort, { once: true });
+  return { signal: controller.signal, cleanup };
 }
 
 // ---------------------------------------------------------------------------
@@ -300,6 +364,19 @@ function capOutput(resp: LLMCompletionResponse, maxChars: number, logger: Logger
   return { ...resp, text: resp.text.slice(0, maxChars), truncated: true };
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function sleep(ms: number, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  if (!signal) return new Promise((resolve) => setTimeout(resolve, ms));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener('abort', onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+      reject(new LLMAbortError());
+    };
+    signal.addEventListener('abort', onAbort, { once: true });
+  });
 }
