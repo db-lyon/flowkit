@@ -407,7 +407,8 @@ interface FlowStepResult {
   name: string;
   result?: TaskResult;
   skipped: boolean;
-  duration: number;       // milliseconds
+  duration: number;              // milliseconds
+  nestedSteps?: FlowStepResult[]; // for a `flow` step: the child's own steps
 }
 ```
 

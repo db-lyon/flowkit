@@ -1191,6 +1191,242 @@ describe('FlowRunner — rollback on failure', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Rollback records attached to a step that FAILED after partly applying
+// ---------------------------------------------------------------------------
+
+/** Succeeds and records its inverse. */
+function createTaskClass(log: string[]) {
+  return class CreateTask extends BaseTask<{ label: string }> {
+    get taskName() { return 'create'; }
+    async execute(): Promise<TaskResult> {
+      log.push(`create:${this.options.label}`);
+      return {
+        success: true,
+        rollback: { taskName: 'remove', payload: { label: this.options.label } },
+      };
+    }
+  };
+}
+
+/** Fails, but part of the mutation landed, so it records the inverse for that part. */
+function partialTaskClass(log: string[]) {
+  return class PartialTask extends BaseTask<{ label: string }> {
+    get taskName() { return 'partial'; }
+    async execute(): Promise<TaskResult> {
+      log.push(`partial:${this.options.label}`);
+      return {
+        success: false,
+        error: new Error('applied part of the change, then gave up'),
+        rollback: { taskName: 'remove', payload: { label: this.options.label } },
+      };
+    }
+  };
+}
+
+function removeTaskClass(log: string[]) {
+  return class RemoveTask extends BaseTask<{ label: string }> {
+    get taskName() { return 'remove'; }
+    async execute(): Promise<TaskResult> {
+      log.push(`remove:${this.options.label}`);
+      return { success: true };
+    }
+  };
+}
+
+function partialRollbackRunner(
+  log: string[],
+  flows: Record<string, FlowDefinition>,
+  extraTasks: Record<string, TaskDefinition> = {},
+  extraClasses: Record<string, TaskConstructor> = {},
+): FlowRunner {
+  const registry = new TaskRegistry()
+    .registerClassPath('test.Create', createTaskClass(log) as unknown as TaskConstructor)
+    .registerClassPath('test.Partial', partialTaskClass(log) as unknown as TaskConstructor)
+    .registerClassPath('test.Remove', removeTaskClass(log) as unknown as TaskConstructor)
+    .registerClassPath('test.Fail', FailTask as unknown as TaskConstructor);
+  for (const [path, ctor] of Object.entries(extraClasses)) registry.registerClassPath(path, ctor);
+  return new FlowRunner({
+    tasks: {
+      create: { class_path: 'test.Create', options: {} },
+      partial: { class_path: 'test.Partial', options: {} },
+      remove: { class_path: 'test.Remove', options: {} },
+      fail: { class_path: 'test.Fail', options: {} },
+      ...extraTasks,
+    },
+    flows,
+    registry,
+    context: {},
+  });
+}
+
+describe('FlowRunner - rollback records from a failed step', () => {
+  it('invokes a failing step’s own inverse first, then unwinds the earlier steps', async () => {
+    const log: string[] = [];
+    const runner = partialRollbackRunner(log, {
+      f: {
+        description: 'partial-write-stops-the-run',
+        rollback_on_failure: true,
+        steps: {
+          '1': { task: 'create', options: { label: 'a' } },
+          '2': { task: 'create', options: { label: 'b' } },
+          '3': { task: 'partial', options: { label: 'c' } },
+        },
+      },
+    });
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(false);
+    // The partial write is the innermost change, so its inverse runs first.
+    expect(log).toEqual([
+      'create:a',
+      'create:b',
+      'partial:c',
+      'remove:c',
+      'remove:b',
+      'remove:a',
+    ]);
+    expect(result.rollback).toEqual({ attempted: 3, succeeded: 3, errors: [] });
+  });
+
+  it('harvests the record when ignore_failure lets the run continue', async () => {
+    const log: string[] = [];
+    const runner = partialRollbackRunner(log, {
+      f: {
+        description: 'partial-write-then-the-run-continues',
+        rollback_on_failure: true,
+        steps: {
+          '1': { task: 'partial', options: { label: 'a' }, ignore_failure: true },
+          '2': { task: 'create', options: { label: 'b' } },
+          '3': { task: 'fail' },
+        },
+      },
+    });
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(false);
+    expect(result.steps[0]!.ignoredFailure).toBe(true);
+    // Records unwind in reverse application order, the tolerated failure included.
+    expect(log).toEqual(['partial:a', 'create:b', 'remove:b', 'remove:a']);
+    expect(result.rollback).toEqual({ attempted: 2, succeeded: 2, errors: [] });
+  });
+
+  it('bubbles a nested flow’s failing step record up to the parent', async () => {
+    const log: string[] = [];
+    const runner = partialRollbackRunner(log, {
+      inner: {
+        description: 'inner',
+        steps: {
+          '1': { task: 'create', options: { label: 'a' } },
+          '2': { task: 'partial', options: { label: 'b' } },
+        },
+      },
+      outer: {
+        description: 'outer',
+        rollback_on_failure: true,
+        steps: {
+          '1': { flow: 'inner' },
+        },
+      },
+    });
+    const result = await runner.run({ flowName: 'outer' });
+    expect(result.success).toBe(false);
+    expect(log).toEqual(['create:a', 'partial:b', 'remove:b', 'remove:a']);
+    expect(result.rollback).toEqual({ attempted: 2, succeeded: 2, errors: [] });
+    // The child's step results survive on the parent's step, so a caller can
+    // say which child step failed instead of parsing the run error message.
+    const nested = result.steps[0]!.nestedSteps!;
+    expect(nested).toHaveLength(2);
+    expect(nested[1]!.name).toBe('partial');
+    expect(nested[1]!.result!.success).toBe(false);
+    expect(nested[1]!.result!.rollback!.taskName).toBe('remove');
+  });
+
+  it('invents no record for a failing step that carries none', async () => {
+    const log: string[] = [];
+    const runner = partialRollbackRunner(log, {
+      f: {
+        description: 'failure-without-a-record',
+        rollback_on_failure: true,
+        steps: {
+          '1': { task: 'create', options: { label: 'a' } },
+          '2': { task: 'fail' },
+        },
+      },
+    });
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(false);
+    expect(log).toEqual(['create:a', 'remove:a']);
+    expect(result.rollback).toEqual({ attempted: 1, succeeded: 1, errors: [] });
+  });
+
+  it('runs no inverse from a failed step when rollback_on_failure is off', async () => {
+    const log: string[] = [];
+    const runner = partialRollbackRunner(log, {
+      f: {
+        description: 'rollback-off',
+        steps: {
+          '1': { task: 'create', options: { label: 'a' } },
+          '2': { task: 'partial', options: { label: 'b' } },
+        },
+      },
+    });
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(false);
+    expect(log).toEqual(['create:a', 'partial:b']);
+    expect(result.rollback).toBeUndefined();
+  });
+
+  it('marks a rollback error that came from a failed step', async () => {
+    const log: string[] = [];
+    class BadRemoveTask extends BaseTask<{ label: string }> {
+      get taskName() { return 'bad_remove'; }
+      async execute(): Promise<TaskResult> {
+        log.push(`bad_remove:${this.options.label}`);
+        return { success: false, error: new Error('cannot undo the partial write') };
+      }
+    }
+    class HalfWrittenTask extends BaseTask<{ label: string }> {
+      get taskName() { return 'half_written'; }
+      async execute(): Promise<TaskResult> {
+        log.push(`half_written:${this.options.label}`);
+        return {
+          success: false,
+          error: new Error('applied part of the change, then gave up'),
+          rollback: { taskName: 'bad_remove', payload: { label: this.options.label } },
+        };
+      }
+    }
+    const runner = partialRollbackRunner(
+      log,
+      {
+        f: {
+          description: 'inverse-of-a-partial-write-fails',
+          rollback_on_failure: true,
+          steps: {
+            '1': { task: 'create', options: { label: 'a' } },
+            '2': { task: 'half_written', options: { label: 'b' } },
+          },
+        },
+      },
+      {
+        bad_remove: { class_path: 'test.BadRemove', options: {} },
+        half_written: { class_path: 'test.HalfWritten', options: {} },
+      },
+      {
+        'test.BadRemove': BadRemoveTask as unknown as TaskConstructor,
+        'test.HalfWritten': HalfWrittenTask as unknown as TaskConstructor,
+      },
+    );
+    const result = await runner.run({ flowName: 'f' });
+    expect(result.success).toBe(false);
+    expect(log).toEqual(['create:a', 'half_written:b', 'bad_remove:b', 'remove:a']);
+    expect(result.rollback!.attempted).toBe(2);
+    expect(result.rollback!.succeeded).toBe(1);
+    expect(result.rollback!.errors).toHaveLength(1);
+    expect(result.rollback!.errors[0]!.taskName).toBe('bad_remove');
+    expect(result.rollback!.errors[0]!.fromFailedStep).toBe(true);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Phase 3 — sub-flow option overrides, when, ignore_failure, plan expansion
 // ---------------------------------------------------------------------------
 

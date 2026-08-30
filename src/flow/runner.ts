@@ -76,6 +76,12 @@ export interface FlowStepResult {
   skipReason?: 'static' | 'when';
   /** True when the step failed but `ignore_failure` let the flow continue. */
   ignoredFailure?: boolean;
+  /**
+   * For a `flow` step: the child flow's own step results. Kept so a caller can
+   * say which child step failed and what it carried, instead of reading the
+   * child's run error message as the only thing that crosses the boundary.
+   */
+  nestedSteps?: FlowStepResult[];
 }
 
 export interface HookError {
@@ -87,7 +93,26 @@ export interface HookError {
 export interface RollbackResult {
   attempted: number;
   succeeded: number;
-  errors: { taskName: string; error: Error }[];
+  errors: {
+    taskName: string;
+    error: Error;
+    /** True when the record came from a step that itself failed. */
+    fromFailedStep?: boolean;
+  }[];
+}
+
+/**
+ * A rollback record harvested from a step, ready for `performRollback`.
+ *
+ * `fromFailedStep` marks a record that came off a step whose own verdict was
+ * failure: the mutation partly landed and the task attached the inverse for the
+ * part that did. The payload therefore describes the partial state, not a
+ * completed change.
+ */
+interface HarvestedRollback {
+  taskName: string;
+  payload: Record<string, unknown>;
+  fromFailedStep?: boolean;
 }
 
 export interface FlowRunResult {
@@ -560,7 +585,7 @@ export class FlowRunner {
     const skipSet = new Set(options.skip ?? []);
     const completedSteps: FlowStepResult[] = [];
     const hookErrors: HookError[] = [];
-    const rollbackRecords: { taskName: string; payload: Record<string, unknown> }[] = [];
+    const rollbackRecords: HarvestedRollback[] = [];
 
     const flow = this.flows[options.flowName];
     if (!flow) {
@@ -710,10 +735,18 @@ export class FlowRunner {
               duration: Date.now() - stepStart,
               attempts,
             };
-            if (taskResult.success && taskResult.rollback) {
+            // A step that FAILED may still have written part of its change, and
+            // a task that knows it did attaches the inverse for the part that
+            // landed. Harvesting only from a successful step throws that record
+            // away at exactly the moment it is worth the most. The failing step
+            // is pushed last and performRollback walks the array backwards, so
+            // the partial write is undone first and the earlier steps unwind
+            // after it.
+            if (taskResult.rollback) {
               rollbackRecords.push({
                 taskName: taskResult.rollback.taskName,
                 payload: taskResult.rollback.payload,
+                fromFailedStep: !taskResult.success,
               });
             }
           } else {
@@ -733,13 +766,18 @@ export class FlowRunner {
               },
               skipped: false,
               duration: Date.now() - stepStart,
+              nestedSteps: nestedResult.steps,
             };
             // Bubble nested rollback records up so the parent can invoke them.
+            // A failing child step's record bubbles for the same reason a
+            // failing main step's does: the part that landed still needs
+            // undoing, and the child is the only place that knows what it was.
             for (const s of nestedResult.steps) {
-              if (s.result?.success && s.result?.rollback) {
+              if (s.result?.rollback) {
                 rollbackRecords.push({
                   taskName: s.result.rollback.taskName,
                   payload: s.result.rollback.payload,
+                  fromFailedStep: !s.result.success,
                 });
               }
             }
@@ -1016,9 +1054,7 @@ export class FlowRunner {
     );
   }
 
-  private async performRollback(
-    records: { taskName: string; payload: Record<string, unknown> }[],
-  ): Promise<RollbackResult> {
+  private async performRollback(records: HarvestedRollback[]): Promise<RollbackResult> {
     const result: RollbackResult = { attempted: 0, succeeded: 0, errors: [] };
 
     for (let i = records.length - 1; i >= 0; i--) {
@@ -1048,12 +1084,14 @@ export class FlowRunner {
           result.errors.push({
             taskName: rec.taskName,
             error: r.error ?? new Error(`Rollback ${rec.taskName} returned failure`),
+            ...(rec.fromFailedStep ? { fromFailedStep: true } : {}),
           });
         }
       } catch (err) {
         result.errors.push({
           taskName: rec.taskName,
           error: err instanceof Error ? err : new Error(String(err)),
+          ...(rec.fromFailedStep ? { fromFailedStep: true } : {}),
         });
       }
     }
