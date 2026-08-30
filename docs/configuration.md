@@ -189,6 +189,20 @@ flows:
 
 Rollback runs after `on_failure` and before `finally`. Nested flow steps' rollback records bubble up to the parent flow so a single `rollback_on_failure` setting covers the whole tree.
 
+A **failing** task may attach a rollback record too, for the part of its mutation that landed before it gave up:
+
+```ts
+return {
+  success: false,
+  error: new Error('renamed 3 of 7 packages, then the batch aborted'),
+  rollback: { taskName: 'rename_back', payload: { moved: ['a', 'b', 'c'] } },
+};
+```
+
+That record is collected like any other. Because the failing step is the last one collected and records are invoked in reverse order, its inverse runs **first**, before the inverses of the steps that came before it. That is the order the partial write needs: undoing an earlier step while the half-applied change is still in place is what leaves the inconsistent state behind. A record attached to a failure describes only the part that applied, so build its payload from what actually landed. Entries in `rollback.errors` that came from a failing step are marked `fromFailedStep: true`.
+
+A step that fails with no rollback record contributes nothing, so a task that only records on success behaves exactly as before.
+
 The inverse task's configured `options` are resolved for `${ns.path}` references as usual, then the `payload` is merged over them. A payload is runtime data the task recorded, not configuration, so it is passed through **literally** — a `${...}` captured inside one reaches the inverse task unchanged.
 
 Rollback runs outside any step's scope, so those configured `options` resolve against the host namespaces only. A `${steps.…}` or `${error.…}` in an inverse task's defaults has nothing to resolve against and fails that one rollback record (it is reported in `rollback.errors`; the remaining records still run). Keep inverse-task defaults to host namespaces and put step-derived values in the `payload`.

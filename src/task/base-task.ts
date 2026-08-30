@@ -129,9 +129,14 @@ export function resolveTaskContext(ctx: TaskContextInput): ResolvedTaskContext {
 }
 
 /**
- * Rollback record returned by a successful mutation task.
+ * Rollback record returned by a mutation task.
  * The runner invokes `taskName` with `payload` (in reverse step order)
- * when `rollback_on_failure` is enabled and a subsequent step fails.
+ * when `rollback_on_failure` is enabled and the flow fails.
+ *
+ * A failing task may attach one too, for the part of its mutation that landed
+ * before it gave up. That record is harvested like any other, and because it is
+ * the last one collected it is the first one invoked, so the partial write is
+ * undone before the steps around it. Attach it only for what actually applied.
  */
 export interface RollbackRecord {
   taskName: string;
