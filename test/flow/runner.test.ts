@@ -875,6 +875,126 @@ describe('FlowRunner — rollback on failure', () => {
     expect(result.rollback).toEqual({ attempted: 2, succeeded: 2, errors: [] });
   });
 
+  it('invokes a nested flow inverse exactly once, not once per level', async () => {
+    // The child inherits rollback_on_failure through the run options, so it
+    // used to unwind its own records AND bubble the same ones to the parent,
+    // which unwound them again. A create followed by two removes is not a
+    // rollback: it is the undo running twice against state already restored,
+    // which for a delete-shaped inverse is an error at best and a second
+    // deletion at worst.
+    const log: string[] = [];
+    class CreateTask extends BaseTask<{ label: string }> {
+      get taskName() { return 'create'; }
+      async execute(): Promise<TaskResult> {
+        log.push(`create:${this.options.label}`);
+        return {
+          success: true,
+          data: { label: this.options.label },
+          rollback: { taskName: 'remove', payload: { label: this.options.label } },
+        };
+      }
+    }
+    class RemoveTask extends BaseTask<{ label: string }> {
+      get taskName() { return 'remove'; }
+      async execute(): Promise<TaskResult> {
+        log.push(`remove:${this.options.label}`);
+        return { success: true };
+      }
+    }
+    const registry = new TaskRegistry()
+      .registerClassPath('test.Create', CreateTask as unknown as TaskConstructor)
+      .registerClassPath('test.Remove', RemoveTask as unknown as TaskConstructor)
+      .registerClassPath('test.Fail', FailTask as unknown as TaskConstructor);
+    const runner = new FlowRunner({
+      tasks: {
+        create: { class_path: 'test.Create', options: {} },
+        remove: { class_path: 'test.Remove', options: {} },
+        fail: { class_path: 'test.Fail', options: {} },
+      },
+      flows: {
+        child: {
+          description: 'the inner flow, which fails after recording an inverse',
+          steps: {
+            '1': { task: 'create', options: { label: 'inner' } },
+            '2': { task: 'fail' },
+          },
+        },
+        parent: {
+          description: 'the outer flow',
+          steps: {
+            '1': { task: 'create', options: { label: 'outer' } },
+            '2': { flow: 'child' },
+          },
+        },
+      },
+      registry,
+      context: {},
+    });
+    // Passed in the RUN OPTIONS, which is how a caller arms it per-run. Options
+    // spread into every nested run, so the child sees it armed too.
+    const result = await runner.run({ flowName: 'parent', rollback_on_failure: true });
+
+    expect(result.success).toBe(false);
+    // Each inverse once, in reverse order, with the child's record taking its
+    // place in the parent's sequence rather than being unwound early.
+    expect(log).toEqual(['create:outer', 'create:inner', 'remove:inner', 'remove:outer']);
+    expect(result.rollback).toEqual({ attempted: 2, succeeded: 2, errors: [] });
+  });
+
+  it('still unwinds a nested flow that no ancestor will unwind for it', async () => {
+    // The mirror case. The parent asked for no rollback, so suppressing the
+    // child's own unwind would mean its rollback_on_failure did nothing at all.
+    const log: string[] = [];
+    class CreateTask extends BaseTask<{ label: string }> {
+      get taskName() { return 'create'; }
+      async execute(): Promise<TaskResult> {
+        log.push(`create:${this.options.label}`);
+        return {
+          success: true,
+          rollback: { taskName: 'remove', payload: { label: this.options.label } },
+        };
+      }
+    }
+    class RemoveTask extends BaseTask<{ label: string }> {
+      get taskName() { return 'remove'; }
+      async execute(): Promise<TaskResult> {
+        log.push(`remove:${this.options.label}`);
+        return { success: true };
+      }
+    }
+    const registry = new TaskRegistry()
+      .registerClassPath('test.Create', CreateTask as unknown as TaskConstructor)
+      .registerClassPath('test.Remove', RemoveTask as unknown as TaskConstructor)
+      .registerClassPath('test.Fail', FailTask as unknown as TaskConstructor);
+    const runner = new FlowRunner({
+      tasks: {
+        create: { class_path: 'test.Create', options: {} },
+        remove: { class_path: 'test.Remove', options: {} },
+        fail: { class_path: 'test.Fail', options: {} },
+      },
+      flows: {
+        child: {
+          description: 'the inner flow, which owns its own unwind',
+          rollback_on_failure: true,
+          steps: {
+            '1': { task: 'create', options: { label: 'inner' } },
+            '2': { task: 'fail' },
+          },
+        },
+        parent: {
+          description: 'the outer flow, which asked for nothing',
+          steps: { '1': { flow: 'child' } },
+        },
+      },
+      registry,
+      context: {},
+    });
+    const result = await runner.run({ flowName: 'parent' });
+
+    expect(result.success).toBe(false);
+    expect(log).toEqual(['create:inner', 'remove:inner']);
+  });
+
   it('continues rollback past individual inverse failures', async () => {
     const log: string[] = [];
     class CreateTask extends BaseTask<{ label: string }> {
