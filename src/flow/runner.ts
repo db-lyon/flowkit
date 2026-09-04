@@ -43,6 +43,18 @@ export interface FlowRunOptions {
    * flat, one-line-per-flow-step plan.
    */
   expandNestedFlows?: boolean;
+  /**
+   * Internal. Set by the runner on a nested run when an ancestor flow has
+   * rollback armed and will therefore invoke this child's records itself.
+   *
+   * A child bubbles its records to the parent, so without this both levels
+   * unwound the same record: the child on its own failure, the parent again on
+   * the nested step's. An undo that runs twice against state already restored
+   * is not a rollback, and for a delete-shaped inverse it is a second deletion.
+   * The outermost armed flow owns the unwind, because it is also the only one
+   * holding the full reverse order.
+   */
+  rollbackOwnedByAncestor?: boolean;
 }
 
 /** Context handed to a `conditionEvaluator` when resolving a string `when:`. */
@@ -593,6 +605,10 @@ export class FlowRunner {
     }
 
     const rollbackEnabled = options.rollback_on_failure ?? flow.rollback_on_failure ?? false;
+    // An ancestor with rollback armed already holds this run's records, bubbled
+    // up from the nested step, and will invoke them in the full reverse order.
+    // This level must not invoke them as well.
+    const ancestorOwnsRollback = options.rollbackOwnedByAncestor === true;
 
     const executionPlan = this.resolveExecutionPlan(flow, skipSet);
 
@@ -752,7 +768,12 @@ export class FlowRunner {
           } else {
             const childParentOptions = this.mergeParentOptions(parentOptions, planStep.options);
             const nestedResult = await this.runWith(
-              { ...options, flowName: planStep.name, plan: false },
+              {
+                ...options,
+                flowName: planStep.name,
+                plan: false,
+                rollbackOwnedByAncestor: rollbackEnabled || ancestorOwnsRollback,
+              },
               childParentOptions,
             );
             stepResult = {
@@ -851,7 +872,7 @@ export class FlowRunner {
 
     // ---- rollback ----
     let rollbackResult: RollbackResult | undefined;
-    if (flowError && rollbackEnabled && rollbackRecords.length > 0) {
+    if (flowError && rollbackEnabled && rollbackRecords.length > 0 && !ancestorOwnsRollback) {
       rollbackResult = await this.performRollback(rollbackRecords);
     }
 
@@ -921,7 +942,15 @@ export class FlowRunner {
       if (hookStep.type === 'flow') {
         const childParentOptions = this.mergeParentOptions(parentOptions, hookStep.options);
         const nested = await this.runWith(
-          { ...options, flowName: hookStep.name, plan: false },
+          {
+            ...options,
+            flowName: hookStep.name,
+            plan: false,
+            // A hook flow's records are NOT bubbled into the host run's
+            // harvest, so nothing above will unwind it. It owns its own,
+            // whatever the run that triggered the hook is doing.
+            rollbackOwnedByAncestor: false,
+          },
           childParentOptions,
         );
         if (!nested.success) {

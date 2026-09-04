@@ -189,6 +189,8 @@ flows:
 
 Rollback runs after `on_failure` and before `finally`. Nested flow steps' rollback records bubble up to the parent flow so a single `rollback_on_failure` setting covers the whole tree.
 
+The outermost flow with rollback armed is the one that invokes them. A nested flow that fails while an ancestor has rollback armed does not unwind its own records: it already handed them upward, and the ancestor holds the full reverse order. Unwinding at both levels would run each inverse twice against state the first pass had already restored, which for a delete-shaped inverse is a second deletion. A nested flow whose ancestors asked for no rollback still unwinds its own, so `rollback_on_failure` on a child flow means what it says. A flow run from an `on_failure` or `finally` hook always owns its own unwind, because hook records are not bubbled into the host run.
+
 A **failing** task may attach a rollback record too, for the part of its mutation that landed before it gave up:
 
 ```ts
