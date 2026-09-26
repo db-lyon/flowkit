@@ -94,6 +94,26 @@ describe('TaskRegistry', () => {
     expect(result.data?.observedPhase).toBe('task');
   });
 
+  it('loads a dynamic task built on a second copy of BaseTask', async () => {
+    const fixture = await import('../fixtures/dynamic-second-copy-task.js');
+    expect(fixture.SecondCopyBaseTask).not.toBe(BaseTask);
+
+    const reg = new TaskRegistry();
+    const task = await reg.create('test.fixtures.dynamic-second-copy-task', {}, {});
+    const result = await task.run();
+
+    expect(task.taskName).toBe('dynamic-second-copy');
+    expect(result.success).toBe(true);
+  });
+
+  it('refuses a dynamic class that only looks like a task', async () => {
+    const reg = new TaskRegistry();
+
+    await expect(reg.create('test.fixtures.dynamic-not-a-task', {}, {})).rejects.toThrow(
+      /does not extend BaseTask/,
+    );
+  });
+
   it('preserves documented class-extends-Original wrap decorators', async () => {
     const reg = new TaskRegistry().register('explicit', ExplicitContextTask);
     reg.wrap('explicit', (Original) => {

@@ -268,3 +268,19 @@ export abstract class BaseTask<TOpts = Record<string, unknown>> {
     }
   }
 }
+
+// Symbol.for, so every loaded copy of flowkit stamps and reads the same key.
+const TASK_BRAND = Symbol.for('@db-lyon/flowkit/BaseTask');
+Object.defineProperty(BaseTask.prototype, TASK_BRAND, { value: true });
+
+/**
+ * Whether `value` is a class extending BaseTask from any copy of flowkit.
+ * `instanceof` answers only for this copy, and a task file can load another.
+ */
+export function extendsBaseTask(value: unknown): boolean {
+  if (typeof value !== 'function') return false;
+  const proto: unknown = value.prototype;
+  if (!proto || typeof proto !== 'object') return false;
+  const parent: object | null = Object.getPrototypeOf(proto);
+  return parent !== null && TASK_BRAND in parent;
+}
