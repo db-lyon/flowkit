@@ -88,6 +88,19 @@ export const TaskDefinitionSchema = z.object({
 });
 
 /**
+ * A declared preflight check. `when` is evaluated by the runner's
+ * `conditionEvaluator` (or the built-in `${...}` truthiness fallback); when it
+ * is truthy the check fires and `action` applies: `error` fails before the
+ * step (or flow) starts, `skip` skips it, `warn` records a warning and runs it.
+ */
+export const StepCheckSchema = z.object({
+  when: z.union([z.string(), z.boolean()]),
+  action: z.enum(['error', 'warn', 'skip']),
+  /** Shown in the error, skip reason or warning. Defaults to one naming the condition. */
+  message: z.string().optional(),
+});
+
+/**
  * The fields of one flow step, as a plain object schema.
  *
  * Exported unrefined so a host can `.extend()` it for its own manifests (a
@@ -114,6 +127,11 @@ export const FlowStepObjectSchema = z.object({
   when: z.union([z.string(), z.boolean()]).optional(),
   /** If true, a failure of this step is recorded but does not abort the flow. */
   ignore_failure: z.boolean().optional(),
+  /**
+   * Preflight checks, evaluated in order just before the step would run (after
+   * `when`), and reported without running anything by `FlowRunner.preflight`.
+   */
+  checks: z.array(StepCheckSchema).optional(),
 });
 
 /** The target rule shared by every step schema: exactly one of task or flow, or a `None` skip. */
@@ -161,6 +179,8 @@ export const FlowDefinitionSchema = z.object({
   finally: z.array(FlowStepSchema).optional(),
   /** If true, invoke rollback records from completed steps in reverse order on failure. */
   rollback_on_failure: z.boolean().optional(),
+  /** Preflight checks for the whole flow, evaluated before any of its steps or hooks. */
+  checks: z.array(StepCheckSchema).optional(),
   /**
    * How runtime `params` reach the steps of a run started on this flow.
    * `flat` (the default): every key goes to every step. `step`: each key is a
@@ -253,6 +273,7 @@ export type OutputSpec = z.infer<typeof OutputSpecSchema>;
 export type OutputSpecs = z.infer<typeof OutputSpecsSchema>;
 export type TaskDefinition = z.infer<typeof TaskDefinitionSchema>;
 export type FlowStep = z.infer<typeof FlowStepSchema>;
+export type StepCheck = z.infer<typeof StepCheckSchema>;
 export type FlowDefinition = z.infer<typeof FlowDefinitionSchema>;
 export type AgentTool = z.infer<typeof AgentToolSchema>;
 export type AgentBudget = z.infer<typeof AgentBudgetSchema>;

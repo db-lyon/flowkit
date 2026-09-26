@@ -287,6 +287,23 @@ new FlowRunner({
 });
 ```
 
+### Preflight checks
+
+Flows and steps can declare `checks` evaluated by the same condition evaluator.
+A fired check errors (before the step starts), skips, or warns:
+
+```yaml
+steps:
+  1:
+    task: import
+    checks:
+      - { when: "editor.has_modal_dialog", action: error, message: A modal dialog is open. }
+```
+
+`runner.preflight(flowName, params)` evaluates every check without running
+anything and reports each step as `run`, `skip`, `error` or `unknown`. See
+[docs/configuration.md](docs/configuration.md#preflight-checks).
+
 ### Continue on failure (`ignore_failure`)
 
 By default any failed step aborts the flow. Mark a step `ignore_failure: true`

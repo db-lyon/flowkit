@@ -1,6 +1,12 @@
 import type { Logger } from '../logger.js';
 import { noopLogger } from '../logger.js';
-import type { TaskDefinition, FlowDefinition, FlowStep, AgentDefinition } from '../config/schema.js';
+import type {
+  TaskDefinition,
+  FlowDefinition,
+  FlowStep,
+  AgentDefinition,
+  StepCheck,
+} from '../config/schema.js';
 import type {
   TaskResult,
   RollbackRecord,
@@ -90,12 +96,85 @@ export interface FlowRunOptions {
   rollbackOwnedByAncestor?: boolean;
 }
 
-/** Context handed to a `conditionEvaluator` when resolving a string `when:`. */
+/** Context handed to a `conditionEvaluator` when resolving a string `when:` or check. */
 export interface ConditionContext {
   steps: FlowStepResult[];
   params?: Record<string, unknown>;
   context: TaskContext;
   error?: { message: string; name: string; stack?: string; step?: string };
+  /** The host namespaces from `FlowRunnerConfig.references`, when configured. */
+  references?: Record<string, unknown>;
+  /** The step being gated. Absent for a flow-level check. */
+  step?: PlanStep;
+  /** Set when the expression is a declared check rather than a `when:`. */
+  check?: StepCheck;
+  /** The flow whose step (or which itself) is being gated. */
+  flowName?: string;
+}
+
+/**
+ * One evaluated check. A run reports the ones that fired; `preflight` reports
+ * every one it evaluated.
+ */
+export interface CheckOutcome {
+  scope: 'flow' | 'step';
+  flowName: string;
+  /** For a step check: the step it gates. */
+  stepNumber?: number;
+  name?: string;
+  /** For a step check: the step's path (`2/1`), as in an expanded plan. */
+  path?: string;
+  when: string | boolean;
+  action: 'error' | 'warn' | 'skip';
+  /** The declared message, else one naming the condition. */
+  message: string;
+  /** The condition was truthy, so the action applies. */
+  triggered: boolean;
+  /** The evaluator threw. `triggered` is false and the outcome is unknown. */
+  error?: Error;
+}
+
+/** Raised (as a step or flow error) when an `action: error` check fires. */
+export class CheckFailedError extends Error {
+  readonly outcome: CheckOutcome;
+  constructor(outcome: CheckOutcome) {
+    super(outcome.message);
+    this.name = 'CheckFailedError';
+    this.outcome = outcome;
+  }
+}
+
+/** One row of `FlowRunner.preflight`. */
+export interface PreflightStep {
+  stepNumber: number;
+  type: 'task' | 'flow';
+  name: string;
+  /** Hierarchical id, as in an expanded plan (`2/1`); hooks use their phase (`finally/1`). */
+  path: string;
+  depth: number;
+  phase?: HookPhase;
+  /**
+   * What the checks say would happen: `run`, `skip` (statically, or a `skip`
+   * check fired), `error` (an `error` check fired) or `unknown` (a check could
+   * not be evaluated before the run, e.g. it reads a step result).
+   */
+  status: 'run' | 'skip' | 'error' | 'unknown';
+  skipReason?: 'static' | 'check';
+  /** Every check evaluated for this row; for a flow step, the child flow's own checks too. */
+  checks: CheckOutcome[];  /** The step's task or flow is deprecated (as in plan mode). */
+  deprecated?: boolean | string;
+  replaced_by?: string;
+}
+
+export interface PreflightResult {
+  flowName: string;
+  /** False when any `error` check fired (flow-level or on any step). */
+  ok: boolean;
+  /** The flow's own checks. */
+  checks: CheckOutcome[];
+  steps: PreflightStep[];
+  /** Fired `warn` checks and deprecations, as a run would report them. */
+  warnings?: RunWarning[];
 }
 
 /**
@@ -117,8 +196,16 @@ export interface FlowStepResult {
   duration: number;
   /** Number of attempts including the first try (≥1 when executed). */
   attempts?: number;
-  /** Why the step was skipped: 'static' (skip list / task: None / flow: None) or 'when' (condition false). */
-  skipReason?: 'static' | 'when';
+  /**
+   * Why the step was skipped: 'static' (skip list / task: None / flow: None),
+   * 'when' (condition false) or 'check' (a `skip` check fired).
+   */
+  skipReason?: 'static' | 'when' | 'check';
+  /**
+   * Checks that fired for this step. For a flow step, those that fired inside
+   * the child flow too.
+   */
+  checks?: CheckOutcome[];
   /** True when the step failed but `ignore_failure` let the flow continue. */
   ignoredFailure?: boolean;
   /**
@@ -175,6 +262,8 @@ export interface FlowRunResult {
    * Absent when there are none.
    */
   warnings?: RunWarning[];
+  /** Every check that fired in the run, flow-level and per step, nested flows included. */
+  checks?: CheckOutcome[];
 }
 
 export interface PlanStep {
@@ -190,6 +279,8 @@ export interface PlanStep {
   when?: string | boolean;
   /** Whether a failure of this step is tolerated. */
   ignore_failure?: boolean;
+  /** Declared checks, unevaluated. `FlowRunner.preflight` evaluates them. */
+  checks?: StepCheck[];
   /** For hook steps: the phase they belong to. Undefined for main steps. */
   phase?: HookPhase;
   /** Hierarchical id (e.g. "2/1") — only set when a plan expands nested flows. */
@@ -209,6 +300,9 @@ export interface FlowDescription {
   deprecated?: boolean | string;
   replaced_by?: string;
   rollback_on_failure?: boolean;
+  options_scope?: OptionsScope;
+  /** The flow's own declared checks. */
+  checks?: StepCheck[];
   /** Main steps, in run order, as the planner resolves them. */
   steps: PlanStep[];
 }
@@ -498,6 +592,8 @@ export class FlowRunner {
     if (flow.deprecated) out.deprecated = flow.deprecated;
     if (flow.replaced_by !== undefined) out.replaced_by = flow.replaced_by;
     if (flow.rollback_on_failure !== undefined) out.rollback_on_failure = flow.rollback_on_failure;
+    if (flow.options_scope !== undefined) out.options_scope = flow.options_scope;
+    if (flow.checks) out.checks = flow.checks;
     return out;
   }
 
@@ -702,6 +798,7 @@ export class FlowRunner {
       retryOn: step.retryOn,
       when: step.when,
       ignore_failure: step.ignore_failure,
+      ...(step.checks ? { checks: step.checks } : {}),
     };
   }
 
@@ -782,6 +879,7 @@ export class FlowRunner {
     params: Record<string, unknown> | undefined,
     executionPhase: ExecutionPhase,
     errorCtx?: { error: Error; step?: string },
+    gate?: { step?: PlanStep; check?: StepCheck; flowName?: string },
   ): Promise<boolean> {
     if (when === undefined) return true;
     if (typeof when === 'boolean') return when;
@@ -801,6 +899,10 @@ export class FlowRunner {
         params,
         context: executionPhase === this.ctx.executionPhase ? this.ctx : { ...this.ctx, executionPhase },
         error,
+        ...(this.references ? { references: this.references } : {}),
+        ...(gate?.step ? { step: gate.step } : {}),
+        ...(gate?.check ? { check: gate.check } : {}),
+        ...(gate?.flowName ? { flowName: gate.flowName } : {}),
       });
     }
 
@@ -811,6 +913,192 @@ export class FlowRunner {
       error,
     });
     return truthy(resolved);
+  }
+
+  /**
+   * Evaluate declared checks in order. Never throws: an evaluator failure is
+   * reported on the outcome.
+   */
+  private async evaluateChecks(
+    checks: StepCheck[] | undefined,
+    scope: 'flow' | 'step',
+    flowName: string,
+    completedSteps: FlowStepResult[],
+    params: Record<string, unknown> | undefined,
+    executionPhase: ExecutionPhase,
+    step?: PlanStep,
+    path?: string,
+    errorCtx?: { error: Error; step?: string },
+  ): Promise<CheckOutcome[]> {
+    const out: CheckOutcome[] = [];
+    for (const check of checks ?? []) {
+      const outcome: CheckOutcome = {
+        scope,
+        flowName,
+        ...(step ? { stepNumber: step.stepNumber, name: step.name } : {}),
+        ...(path !== undefined ? { path } : {}),
+        when: check.when,
+        action: check.action,
+        message: check.message ?? defaultCheckMessage(check, scope === 'flow' ? flowName : step?.name),
+        triggered: false,
+      };
+      try {
+        outcome.triggered = await this.evaluateWhen(
+          check.when,
+          completedSteps,
+          params,
+          executionPhase,
+          errorCtx,
+          { step, check, flowName },
+        );
+      } catch (err) {
+        outcome.error = err instanceof Error ? err : new Error(String(err));
+      }
+      out.push(outcome);
+    }
+    return out;
+  }
+
+  /**
+   * Fold evaluated checks into a verdict. Fired checks go to `fired`, fired
+   * `warn` checks to `warnings`. The first fired `error` check wins; an
+   * evaluator failure is returned separately so the caller can treat it like a
+   * `when:` that throws.
+   */
+  private applyChecks(
+    outcomes: CheckOutcome[],
+    fired: CheckOutcome[],
+    warnings: RunWarning[],
+  ): { error?: CheckFailedError; skip: boolean; evalError?: Error } {
+    let error: CheckFailedError | undefined;
+    let evalError: Error | undefined;
+    let skip = false;
+    for (const o of outcomes) {
+      if (o.error) {
+        evalError ??= new Error(`Check on "${o.name ?? o.flowName}" could not be evaluated: ${o.error.message}`);
+        continue;
+      }
+      if (!o.triggered) continue;
+      fired.push(o);
+      if (o.action === 'error') error ??= new CheckFailedError(o);
+      else if (o.action === 'skip') skip = true;
+      else {
+        warnings.push(checkWarning(o));
+        this.logger.warn({ flow: o.flowName, step: o.stepNumber }, o.message);
+      }
+    }
+    return { error, skip, evalError };
+  }
+
+  /**
+   * Evaluate every declared check of a flow and its steps without running
+   * anything. Checks see no step results (nothing has run) and the runtime
+   * `params`; one that needs a step result reports an evaluation error and the
+   * row's status is `unknown`. Nested flows are expanded, with paths as in an
+   * expanded plan; hook steps are listed under their phase.
+   */
+  async preflight(
+    flowName: string,
+    params?: Record<string, unknown>,
+    options: { skip?: string[] } = {},
+  ): Promise<PreflightResult> {
+    const flow = this.flows[flowName];
+    if (!flow) throw new Error(`Flow "${flowName}" not found in configuration`);
+    const skipSet = new Set(options.skip ?? []);
+    const flowChecks = await this.evaluateChecks(
+      flow.checks,
+      'flow',
+      flowName,
+      [],
+      params,
+      DEFAULT_EXECUTION_PHASE,
+    );
+    const steps: PreflightStep[] = [];
+    await this.preflightFlow(flow, flowName, params, skipSet, '', 0, new Set([flowName]), steps);
+
+    const all = [...flowChecks, ...steps.flatMap((s) => s.checks)];
+    const warnings = mergeWarnings(
+      all.filter((c) => c.triggered && c.action === 'warn').map(checkWarning),
+      await this.annotatePlan(steps.filter((s) => s.status !== 'skip') as unknown as PlanStep[]),
+    );
+    const result: PreflightResult = {
+      flowName,
+      ok: !all.some((c) => c.triggered && c.action === 'error'),
+      checks: flowChecks,
+      steps,
+    };
+    if (warnings.length > 0) result.warnings = warnings;
+    return result;
+  }
+
+  private async preflightFlow(
+    flow: FlowDefinition,
+    flowName: string,
+    params: Record<string, unknown> | undefined,
+    skipSet: Set<string>,
+    pathPrefix: string,
+    depth: number,
+    ancestors: Set<string>,
+    out: PreflightStep[],
+  ): Promise<void> {
+    const at = (p: string) => (pathPrefix ? `${pathPrefix}/${p}` : p);
+    const rows: { step: PlanStep; path: string }[] = [
+      ...this.resolveExecutionPlan(flow, skipSet).map((step) => ({ step, path: at(String(step.stepNumber)) })),
+      ...(['on_start', 'on_success', 'on_failure', 'finally'] as const).flatMap((phase) =>
+        this.planHookSteps(flow[phase], phase, skipSet, 0).map((step, i) => ({
+          step,
+          path: at(`${phase}/${i + 1}`),
+        })),
+      ),
+    ];
+    for (const { step, path } of rows) {
+      const row: PreflightStep = {
+        stepNumber: step.stepNumber,
+        type: step.type,
+        name: step.name,
+        path,
+        depth,
+        ...(step.phase ? { phase: step.phase } : {}),
+        status: 'run',
+        checks: [],
+      };
+      out.push(row);
+      if (step.skipped) {
+        row.status = 'skip';
+        row.skipReason = 'static';
+        continue;
+      }
+      row.checks = await this.evaluateChecks(
+        step.checks,
+        'step',
+        flowName,
+        [],
+        params,
+        step.phase ?? DEFAULT_EXECUTION_PHASE,
+        step,
+        path,
+      );
+      const child = step.type === 'flow' && !ancestors.has(step.name) ? this.flows[step.name] : undefined;
+      if (child) {
+        row.checks.push(
+          ...(await this.evaluateChecks(child.checks, 'flow', step.name, [], params, DEFAULT_EXECUTION_PHASE)),
+        );
+      }
+      row.status = checkStatus(row.checks);
+      if (row.status === 'skip') row.skipReason = 'check';
+      if (child && row.status !== 'skip') {
+        await this.preflightFlow(
+          child,
+          step.name,
+          params,
+          skipSet,
+          path,
+          depth + 1,
+          new Set(ancestors).add(step.name),
+          out,
+        );
+      }
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -900,6 +1188,44 @@ export class FlowRunner {
       return planResult;
     }
 
+    // Flow-level checks gate everything, hooks included, so they run before
+    // the run is announced to `beforeRun`.
+    const firedChecks: CheckOutcome[] = [];
+    const checkWarnings: RunWarning[] = [];
+    if (flow.checks?.length) {
+      const outcomes = await this.evaluateChecks(
+        flow.checks,
+        'flow',
+        options.flowName,
+        [],
+        options.params,
+        DEFAULT_EXECUTION_PHASE,
+      );
+      const verdict = this.applyChecks(outcomes, firedChecks, checkWarnings);
+      const failure = verdict.error ?? verdict.evalError;
+      if (failure || verdict.skip) {
+        const done: FlowRunResult = {
+          success: !failure,
+          steps: !failure
+            ? executionPlan.map((s) => ({
+                stepNumber: s.stepNumber,
+                type: s.type,
+                name: s.name,
+                skipped: true,
+                duration: 0,
+                skipReason: 'check' as const,
+              }))
+            : [],
+          duration: Date.now() - startTime,
+          ...(failure ? { error: failure } : {}),
+          ...(firedChecks.length > 0 ? { checks: firedChecks } : {}),
+        };
+        const w = mergeWarnings(flowDeprecation ? [flowDeprecation] : [], checkWarnings);
+        if (w.length > 0) done.warnings = w;
+        return done;
+      }
+    }
+
     if (isTopLevel) {
       await this.hooks.beforeRun?.(options.flowName, executionPlan);
     }
@@ -986,8 +1312,55 @@ export class FlowRunner {
           continue;
         }
 
+        // Declared checks, after `when` has decided the step would run.
+        const stepFired: CheckOutcome[] = [];
+        if (planStep.checks?.length) {
+          const outcomes = await this.evaluateChecks(
+            planStep.checks,
+            'step',
+            options.flowName,
+            completedSteps,
+            options.params,
+            DEFAULT_EXECUTION_PHASE,
+            planStep,
+            this.stepPath(frame, planStep.stepNumber),
+          );
+          const verdict = this.applyChecks(outcomes, stepFired, checkWarnings);
+          firedChecks.push(...stepFired);
+          if (verdict.error || verdict.skip || verdict.evalError) {
+            const sr: FlowStepResult = {
+              stepNumber: planStep.stepNumber,
+              type: planStep.type,
+              name: planStep.name,
+              skipped: !verdict.error && !verdict.evalError,
+              duration: 0,
+              ...(stepFired.length > 0 ? { checks: [...stepFired] } : {}),
+            };
+            if (sr.skipped) {
+              sr.skipReason = 'check';
+            } else {
+              sr.result = { success: false, error: (verdict.error ?? verdict.evalError)! };
+            }
+            completedSteps.push(sr);
+            await this.hooks.afterStep?.(planStep, sr);
+            if (sr.skipped) continue;
+            // A check that could not be evaluated fails like a `when:` that
+            // throws, and honours ignore_failure. A fired `error` check is a
+            // gate and aborts regardless.
+            if (!verdict.error && planStep.ignore_failure) {
+              sr.ignoredFailure = true;
+              continue;
+            }
+            flowError = sr.result!.error!;
+            flowErrorStepName = planStep.name;
+            await this.hooks.onStepError?.(planStep, flowError, completedSteps);
+            break;
+          }
+        }
+
         await this.hooks.beforeStep?.(planStep);
         const stepStart = Date.now();
+        let nestedChecks: CheckOutcome[] | undefined;
 
         try {
           let stepResult: FlowStepResult;
@@ -1034,6 +1407,8 @@ export class FlowRunner {
               childParentOptions,
               { ...frame, pathPrefix: this.stepPath(frame, planStep.stepNumber) },
             );
+            nestedChecks = nestedResult.checks;
+            if (nestedChecks) firedChecks.push(...nestedChecks);
             stepResult = {
               stepNumber: planStep.stepNumber,
               type: 'flow',
@@ -1063,6 +1438,8 @@ export class FlowRunner {
             }
           }
 
+          const stepChecks = [...stepFired, ...(nestedChecks ?? [])];
+          if (stepChecks.length > 0) stepResult.checks = stepChecks;
           completedSteps.push(stepResult);
           await this.hooks.afterStep?.(planStep, stepResult);
 
@@ -1173,10 +1550,12 @@ export class FlowRunner {
     };
     const warnings = mergeWarnings(
       flowDeprecation ? [flowDeprecation] : [],
+      checkWarnings,
       ...completedSteps.map((s) => s.result?.warnings),
       hookWarnings,
     );
     if (warnings.length > 0) result.warnings = warnings;
+    if (firedChecks.length > 0) result.checks = firedChecks;
 
     if (isTopLevel) {
       await this.hooks.afterRun?.(result);
@@ -1216,6 +1595,27 @@ export class FlowRunner {
         });
         return false;
       }
+    }
+
+    if (hookStep.checks?.length) {
+      const outcomes = await this.evaluateChecks(
+        hookStep.checks,
+        'step',
+        options.flowName,
+        completedSteps,
+        options.params,
+        hookStep.phase ?? DEFAULT_EXECUTION_PHASE,
+        hookStep,
+        undefined,
+        errorCtx,
+      );
+      const verdict = this.applyChecks(outcomes, [], hookWarnings);
+      const failure = verdict.error ?? verdict.evalError;
+      if (failure) {
+        hookErrors.push({ phase: hookStep.phase!, name: hookStep.name, error: failure });
+        return false;
+      }
+      if (verdict.skip) return true;
     }
 
     try {
@@ -1416,6 +1816,30 @@ export class FlowRunner {
 
     return result;
   }
+}
+
+/** Status a set of evaluated checks gives a preflight row. Error beats skip beats unknown. */
+function checkStatus(outcomes: CheckOutcome[]): PreflightStep['status'] {
+  if (outcomes.some((o) => o.triggered && o.action === 'error')) return 'error';
+  if (outcomes.some((o) => o.triggered && o.action === 'skip')) return 'skip';
+  if (outcomes.some((o) => o.error)) return 'unknown';
+  return 'run';
+}
+
+function defaultCheckMessage(check: StepCheck, subject: string | undefined): string {
+  const cond = typeof check.when === 'string' ? check.when : String(check.when);
+  return `Check on ${subject ? `"${subject}"` : 'step'} fired (${check.action}): ${cond}`;
+}
+
+/** The warning a fired `warn` check contributes to a run. */
+function checkWarning(o: CheckOutcome): RunWarning {
+  return {
+    code: 'check',
+    message: o.message,
+    name: o.scope === 'flow' ? o.flowName : (o.name ?? o.flowName),
+    kind: o.scope === 'flow' ? 'flow' : undefined,
+    ...(o.stepNumber !== undefined ? { stepNumber: o.stepNumber } : {}),
+  } as RunWarning;
 }
 
 /** Append a runner notice to a task's result without dropping any the task added itself. */

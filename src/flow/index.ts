@@ -1,4 +1,4 @@
-export { FlowRunner } from './runner.js';
+export { FlowRunner, CheckFailedError } from './runner.js';
 export type {
   FlowRunOptions,
   FlowStepResult,
@@ -9,5 +9,10 @@ export type {
   NestedAgentTaskFactory,
   PlanStep,
   FlowDescription,
+  CheckOutcome,
+  PreflightStep,
+  PreflightResult,
+  ConditionContext,
+  ConditionEvaluator,
   OptionsScope,
 } from './runner.js';

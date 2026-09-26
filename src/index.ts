@@ -8,6 +8,7 @@ export {
   OutputSpecsSchema,
   TaskDefinitionSchema,
   FlowStepSchema,
+  StepCheckSchema,
   FlowStepObjectSchema,
   FlowStepsSchema,
   refineFlowStep,
@@ -25,6 +26,7 @@ export type {
   OutputSpecs,
   TaskDefinition,
   FlowStep,
+  StepCheck,
   FlowDefinition,
   AgentTool,
   AgentBudget,
@@ -97,7 +99,7 @@ export type {
 } from './task/llm-provider.js';
 
 // Flow
-export { FlowRunner } from './flow/runner.js';
+export { FlowRunner, CheckFailedError } from './flow/runner.js';
 export type {
   FlowRunOptions,
   FlowStepResult,
@@ -108,6 +110,11 @@ export type {
   NestedAgentTaskFactory,
   PlanStep,
   FlowDescription,
+  CheckOutcome,
+  PreflightStep,
+  PreflightResult,
+  ConditionContext,
+  ConditionEvaluator,
   OptionsScope,
   HookPhase,
   HookError,

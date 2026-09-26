@@ -61,6 +61,7 @@ flows:
 |-------|------|----------|-------------|
 | `description` | `string` | yes | Human-readable flow description |
 | `steps` | `object` | yes | Steps keyed by number (execution order) |
+| `checks` | `array` | no | Flow-level preflight checks. See [Preflight checks](#preflight-checks) |
 | `options_scope` | `'flat' \| 'step'` | no | How runtime `params` reach steps. See [Step-scoped runtime options](#step-scoped-runtime-options) |
 | `deprecated` | `boolean \| string` | no | Mark the flow deprecated. See [Deprecation](#deprecation) |
 | `replaced_by` | `string` | no | The flow to use instead, named in the deprecation warning |
@@ -74,6 +75,10 @@ Each step must have exactly one of `task` or `flow` (mutually exclusive), unless
 | `task` | `string` | one of task/flow | Task name to execute |
 | `flow` | `string` | one of task/flow | Nested flow name to execute |
 | `options` | `object` | no | Override options for this step |
+| `when` | `string \| boolean` | no | Run the step only when truthy |
+| `ignore_failure` | `boolean` | no | Record a failure and continue |
+| `retries` / `retryDelay` / `retryOn` | | no | See [Per-step retry](#per-step-retry) |
+| `checks` | `array` | no | Preflight checks. See [Preflight checks](#preflight-checks) |
 
 Step numbers are sorted numerically at execution time, so `1, 2, 10` runs in that order (not lexicographic `1, 10, 2`).
 
@@ -285,6 +290,75 @@ steps:
 ```
 
 Returns `{ text, parsed?, usage? }`. Provider failures become step failures; missing provider is a clear error.
+
+### Preflight checks
+
+A flow or a step can declare `checks`: conditions that gate it, evaluated by the
+same `conditionEvaluator` as `when:` (or the built-in `${...}` truthiness
+fallback). A check **fires** when its `when` is truthy, and its `action` applies:
+
+| `action` | At run time |
+|----------|-------------|
+| `error` | The step fails with a `CheckFailedError` carrying `message`, before it starts. The flow aborts whatever `ignore_failure` says: a gate is not a failure to tolerate. |
+| `skip` | The step is skipped (`skipReason: 'check'`). |
+| `warn` | A `check` warning is added to `FlowRunResult.warnings` and the step runs. |
+
+```yaml
+flows:
+  import_assets:
+    checks:                                    # gate the whole flow
+      - when: "not editor.connected"
+        action: error
+        message: No editor is connected.
+    steps:
+      1:
+        task: import
+        checks:
+          - when: "editor.has_modal_dialog"
+            action: error
+            message: A modal dialog is open in the editor.
+          - when: "not project.python_enabled"
+            action: skip
+      2:
+        task: validate
+        checks:
+          - { when: "${project.dirty}", action: warn, message: Unsaved changes. }
+```
+
+- Step checks run in order, just before the step would run and after `when:`
+  has let it. Error beats skip beats warn.
+- Flow checks run before anything in the flow, `on_start` included. An `error`
+  fails the flow with no steps; a `skip` returns success with every main step
+  skipped (`skipReason: 'check'`). For a nested flow the verdict becomes the
+  flow step's.
+- Checks on hook steps are enforced too; a fired `error` is reported in
+  `hookErrors`.
+- A check whose expression throws (for example one that reads a step result
+  that does not exist) fails the step the way a throwing `when:` does, and
+  `ignore_failure` applies.
+- The evaluator's `ConditionContext` carries `check`, `step`, `flowName` and
+  `references` (the runner's host namespaces) alongside the usual `steps`,
+  `params`, `context` and `error`, so a check can be written against host state.
+- Fired checks are listed on the step (`FlowStepResult.checks`) and for the
+  whole run, nested flows included (`FlowRunResult.checks`).
+
+`FlowRunner.preflight(flowName, params?, { skip? })` evaluates every check in a
+flow without running anything and reports what would happen to each step:
+
+```typescript
+const pf = await runner.preflight('import_assets', { path: '/Game/X' });
+pf.ok;     // false when any `error` check fired
+pf.checks; // the flow's own checks, evaluated
+pf.steps;  // [{ path: '1', status: 'error', checks: [...] }, { path: '2', status: 'run', ... }]
+```
+
+Each row has a `status` of `run`, `skip` (statically, or a `skip` check fired),
+`error` or `unknown`. Nothing has run at preflight, so checks see no step
+results; one that reads a step result cannot be evaluated, its outcome carries
+the `error`, and the row is `unknown` rather than guessed. Nested flows are
+expanded with the same paths as an expanded plan, and hook steps are listed as
+`<phase>/<n>`. Plan mode (`run({ plan: true })`) lists each step's declared
+`checks` unevaluated.
 
 ### Deprecation
 

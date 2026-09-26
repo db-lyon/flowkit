@@ -433,6 +433,11 @@ class FlowRunner {
   async runTask(taskName: string, options?: Record<string, unknown>): Promise<TaskResult>;
   async describeTask(taskName: string): Promise<TaskDescription>;
   describeFlow(flowName: string): FlowDescription;
+  async preflight(
+    flowName: string,
+    params?: Record<string, unknown>,
+    options?: { skip?: string[] },
+  ): Promise<PreflightResult>;
   resolveExecutionPlan(
     flow: FlowDefinition,
     skipSet: Set<string>,
@@ -441,6 +446,62 @@ class FlowRunner {
 ```
 
 ---
+
+**Checks and preflight**
+
+```typescript
+type StepCheck = { when: string | boolean; action: 'error' | 'warn' | 'skip'; message?: string };
+
+interface CheckOutcome {
+  scope: 'flow' | 'step';
+  flowName: string;
+  stepNumber?: number;
+  name?: string;
+  path?: string;
+  when: string | boolean;
+  action: 'error' | 'warn' | 'skip';
+  message: string;      // declared, or one naming the condition
+  triggered: boolean;   // the condition was truthy
+  error?: Error;        // the evaluator threw
+}
+
+class CheckFailedError extends Error {
+  readonly outcome: CheckOutcome;
+}
+
+interface PreflightResult {
+  flowName: string;
+  ok: boolean;               // no `error` check fired
+  checks: CheckOutcome[];    // the flow's own
+  steps: PreflightStep[];
+  warnings?: RunWarning[];   // fired `warn` checks, deprecations
+}
+
+interface PreflightStep {
+  stepNumber: number;
+  type: 'task' | 'flow';
+  name: string;
+  path: string;              // '2/1', or '<phase>/<n>' for hooks
+  depth: number;
+  phase?: HookPhase;
+  status: 'run' | 'skip' | 'error' | 'unknown';
+  skipReason?: 'static' | 'check';
+  checks: CheckOutcome[];
+  deprecated?: boolean | string;
+  replaced_by?: string;
+}
+
+interface ConditionContext {
+  steps: FlowStepResult[];
+  params?: Record<string, unknown>;
+  context: TaskContext;
+  error?: { message: string; name: string; stack?: string; step?: string };
+  references?: Record<string, unknown>; // FlowRunnerConfig.references
+  step?: PlanStep;                      // the step being gated
+  check?: StepCheck;                    // set when evaluating a check
+  flowName?: string;
+}
+```
 
 **`FlowDescription`**
 
@@ -451,6 +512,8 @@ interface FlowDescription {
   deprecated?: boolean | string;
   replaced_by?: string;
   rollback_on_failure?: boolean;
+  options_scope?: 'flat' | 'step';
+  checks?: StepCheck[];
   steps: PlanStep[]; // main steps in run order
 }
 ```
@@ -528,6 +591,7 @@ interface FlowRunResult {
   hookErrors?: HookError[];
   rollback?: RollbackResult;
   warnings?: RunWarning[]; // deprecations and fired `warn` checks, without repeats
+  checks?: CheckOutcome[]; // every check that fired, nested flows included
 }
 ```
 
@@ -543,6 +607,10 @@ interface FlowStepResult {
   result?: TaskResult;
   skipped: boolean;
   duration: number;              // milliseconds
+  attempts?: number;
+  skipReason?: 'static' | 'when' | 'check';
+  ignoredFailure?: boolean;
+  checks?: CheckOutcome[];       // checks that fired for this step (and inside its flow)
   nestedSteps?: FlowStepResult[]; // for a `flow` step: the child's own steps
 }
 ```
@@ -565,6 +633,7 @@ interface PlanStep {
   retryOn?: string;
   when?: string | boolean;
   ignore_failure?: boolean;
+  checks?: StepCheck[];            // declared, unevaluated
   phase?: HookPhase;               // hook steps only
   path?: string;                   // expanded plans: hierarchical id, e.g. '2/1'
   depth?: number;
