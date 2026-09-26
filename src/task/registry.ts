@@ -7,11 +7,39 @@ import {
   type TaskContext,
   type TaskContextInput,
 } from './base-task.js';
+import type { TaskDefinition, OptionSpecs, OutputSpecs } from '../config/schema.js';
+import { resolveTaskDefinition } from './task-resolution.js';
+import { applyOptionDefaults, mergeOptionSpecs, taskClassMetadata } from './options-schema.js';
 
 export type TaskConstructor = new (
   ctx: TaskContext,
   options: Record<string, unknown>,
 ) => BaseTask;
+
+/**
+ * Everything known about one task, for a host's `describe`, `list` or docs.
+ * Field names follow the YAML keys so a description can be printed as config.
+ */
+export interface TaskDescription {
+  /** The name asked about: a configured task name, a registered name or a class path. */
+  name: string;
+  /** What the name resolves to in the registry. */
+  class_path: string;
+  /** The definition's description, else the class's static `description`. */
+  description?: string;
+  group?: string;
+  /**
+   * Default options a run starts from: schema defaults, then the definition's
+   * `options`. Uninterpolated, so `${...}` references show as written.
+   */
+  options: Record<string, unknown>;
+  /** The class's static `optionsSchema` refined by the definition's `options_schema`. */
+  options_schema?: OptionSpecs;
+  /** The class's static `outputs` refined by the definition's `outputs`. */
+  outputs?: OutputSpecs;
+  idempotent?: boolean;
+  reversible?: boolean;
+}
 
 export class TaskRegistry {
   private classPathMap = new Map<string, TaskConstructor>();
@@ -109,6 +137,39 @@ export class TaskRegistry {
     // Always write to nameMap so subsequent resolve() finds it
     this.nameMap.set(name, wrapped);
     return this;
+  }
+
+  /**
+   * Describe a task: resolve its class (loading it if needed) and fold the
+   * class's static metadata together with its configured definition.
+   *
+   * Pass the configured task definitions (`config.tasks`) to include them;
+   * without, only the class is described. `FlowRunner.describeTask` passes the
+   * runner's own.
+   */
+  async describe(
+    name: string,
+    taskDefinitions?: Record<string, TaskDefinition>,
+  ): Promise<TaskDescription> {
+    const def = taskDefinitions?.[name];
+    const { classPath, options } = resolveTaskDefinition(name, taskDefinitions);
+    const meta = taskClassMetadata(await this.resolve(classPath));
+    const optionsSchema = mergeOptionSpecs(meta.optionsSchema, def?.options_schema);
+    const outputs =
+      meta.outputs || def?.outputs ? { ...(meta.outputs ?? {}), ...(def?.outputs ?? {}) } : undefined;
+    const out: TaskDescription = {
+      name,
+      class_path: classPath,
+      options: applyOptionDefaults(optionsSchema, { ...options }),
+    };
+    const description = def?.description ?? meta.description;
+    if (description !== undefined) out.description = description;
+    if (def?.group !== undefined) out.group = def.group;
+    if (optionsSchema) out.options_schema = optionsSchema;
+    if (outputs) out.outputs = outputs;
+    if (def?.idempotent !== undefined) out.idempotent = def.idempotent;
+    if (def?.reversible !== undefined) out.reversible = def.reversible;
+    return out;
   }
 
   /** Return all registered names and class paths. */

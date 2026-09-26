@@ -55,6 +55,81 @@ export default class FetchData extends BaseTask<MyOptions> {
 | Member | Description |
 |--------|-------------|
 | `validate()` | Called before `execute()`. Throw to abort with a validation error. |
+| `static optionsSchema` | Declared options, checked before the task runs. See below. |
+| `static outputs` | Declared `data` keys, for `describe` and docs. Not enforced. |
+| `static description` | Used when the task definition has no `description`. |
+
+### Declaring options
+
+A task class can declare its options statically, the way a CumulusCI task
+declares `task_options`. `FlowRunner` checks a step's final options against the
+declaration before it constructs the task, so a bad option fails with a message
+naming the task and the option, and the task never runs:
+
+```typescript
+import { BaseTask, type OptionSpecs, type TaskResult } from '@db-lyon/flowkit';
+
+export default class Deploy extends BaseTask<{ environment: string; replicas: number }> {
+  static description = 'Deploy the build';
+  static optionsSchema: OptionSpecs = {
+    environment: { type: 'string', enum: ['staging', 'prod'], required: true, description: 'Target' },
+    replicas: { type: 'integer', minimum: 1, maximum: 5, default: 2 },
+  };
+  static outputs = { url: { type: 'string', description: 'Where it landed' } };
+
+  get taskName() { return 'deploy'; }
+  async execute(): Promise<TaskResult> { /* ... */ return { success: true }; }
+}
+// Task "deploy": option "environment" must be one of ["staging","prod"]
+```
+
+Each option spec takes `type` (one type or a list), `description`,
+`required`, `default`, and the JSON Schema constraint keywords `enum`, `const`,
+`minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `minLength`,
+`maxLength`, `pattern`, `minItems`, `maxItems`, `items`, `properties`,
+`additionalProperties` and `nullable`.
+
+- `default` fills an option no layer supplied. It is the lowest precedence of
+  all, below the task definition's `options`.
+- `required` is checked after every layer (defaults, definition options, step
+  options, runtime params) has been merged.
+- Options the schema does not declare are allowed through.
+- A failed check is not retried, whatever the step's `retries`.
+
+A task definition refines the class declaration with `options_schema`, option
+by option and field by field, so one configured variant can narrow an enum,
+change a default or add an option without restating the rest:
+
+```yaml
+tasks:
+  deploy_staging:
+    class_path: tasks.Deploy
+    options_schema:
+      environment: { enum: [staging], default: staging }
+```
+
+The check runs on every `FlowRunner` path: flow steps, hook steps, `runTask`,
+rollback and composite child steps. A task built directly (`new Deploy(...)`)
+or through `this.call()` from another task is not checked.
+`validateTaskOptions(specs, options)` and `assertTaskOptions(name, specs,
+options)` run the same check for a host that constructs tasks itself.
+
+### Describing a task
+
+`registry.describe(name, taskDefinitions?)` folds a task's class metadata and
+its configured definition into one object, for a host's `describe` command or
+generated docs. `FlowRunner.describeTask(name)` does the same with the
+runner's own definitions:
+
+```typescript
+const d = await runner.describeTask('deploy');
+// {
+//   name: 'deploy', class_path: 'tasks.Deploy', description: 'Deploy the build',
+//   options: { replicas: 2 },               // schema defaults, then definition options
+//   options_schema: { environment: {...}, replicas: {...} },
+//   outputs: { url: {...} },
+// }
+```
 
 ### Available on `this`
 

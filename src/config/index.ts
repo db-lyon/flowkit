@@ -2,6 +2,10 @@ export { deepMerge } from './deep-merge.js';
 
 export {
   TaskOptionsSchema,
+  OptionSpecSchema,
+  OptionSpecsSchema,
+  OutputSpecSchema,
+  OutputSpecsSchema,
   TaskDefinitionSchema,
   FlowStepSchema,
   FlowStepObjectSchema,
@@ -16,6 +20,10 @@ export {
 
 export type {
   TaskOptions,
+  OptionSpec,
+  OptionSpecs,
+  OutputSpec,
+  OutputSpecs,
   TaskDefinition,
   FlowStep,
   FlowDefinition,

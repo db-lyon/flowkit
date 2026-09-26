@@ -33,6 +33,8 @@ tasks:
 | `description` | `string` | no | Human-readable description |
 | `group` | `string` | no | Logical grouping label |
 | `options` | `object` | no | Default options (merged with step-level overrides) |
+| `options_schema` | `object` | no | Declared options, refining the class's `optionsSchema`. See [Declaring options](custom-tasks.md#declaring-options) |
+| `outputs` | `object` | no | Declared `data` outputs (`type`, `description`), for `describe`. Not enforced |
 
 ### Flow definition
 

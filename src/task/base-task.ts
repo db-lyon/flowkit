@@ -2,7 +2,7 @@ import type { Logger } from '../logger.js';
 import { noopLogger } from '../logger.js';
 import type { TaskRegistry } from './registry.js';
 import type { LLMProvider, LLMToolHandler } from './llm-provider.js';
-import type { TaskDefinition } from '../config/schema.js';
+import type { TaskDefinition, OptionSpecs, OutputSpecs } from '../config/schema.js';
 import type { TokenLedger } from './token-ledger.js';
 import type { ReferenceContext } from '../references.js';
 import { resolveTaskCall } from './task-resolution.js';
@@ -152,6 +152,17 @@ export interface TaskResult {
 }
 
 export abstract class BaseTask<TOpts = Record<string, unknown>> {
+  /**
+   * Declared options, checked by `FlowRunner` before the task runs. A task
+   * definition's `options_schema` refines it per option. Optional: a class
+   * that declares nothing is not checked.
+   */
+  declare static optionsSchema?: OptionSpecs;
+  /** Declared `data` outputs, for `describe` and docs. Not enforced. */
+  declare static outputs?: OutputSpecs;
+  /** Fallback description when the task definition has none. */
+  declare static description?: string;
+
   protected logger: Logger;
   /**
    * Typed `TaskContext`, not `ResolvedTaskContext`, so a subclass can narrow it

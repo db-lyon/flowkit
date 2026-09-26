@@ -2,6 +2,10 @@
 export { deepMerge } from './config/deep-merge.js';
 export {
   TaskOptionsSchema,
+  OptionSpecSchema,
+  OptionSpecsSchema,
+  OutputSpecSchema,
+  OutputSpecsSchema,
   TaskDefinitionSchema,
   FlowStepSchema,
   FlowStepObjectSchema,
@@ -15,6 +19,10 @@ export {
 } from './config/schema.js';
 export type {
   TaskOptions,
+  OptionSpec,
+  OptionSpecs,
+  OutputSpec,
+  OutputSpecs,
   TaskDefinition,
   FlowStep,
   FlowDefinition,
@@ -41,7 +49,16 @@ export type {
 export { ShellTask } from './task/shell-task.js';
 export type { ShellTaskOptions } from './task/shell-task.js';
 export { TaskRegistry } from './task/registry.js';
-export type { TaskConstructor } from './task/registry.js';
+export type { TaskConstructor, TaskDescription } from './task/registry.js';
+export {
+  TaskOptionsError,
+  validateTaskOptions,
+  assertTaskOptions,
+  applyOptionDefaults,
+  mergeOptionSpecs,
+  taskClassMetadata,
+} from './task/options-schema.js';
+export type { TaskClassMetadata, TaskOptionIssue } from './task/options-schema.js';
 export { AgentPromptTask } from './task/agent-prompt-task.js';
 export type { AgentPromptOptions } from './task/agent-prompt-task.js';
 export { AgentTask } from './task/agent-task.js';

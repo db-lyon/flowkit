@@ -320,6 +320,10 @@ class TaskRegistry {
     options: Record<string, unknown>,
   ): Promise<BaseTask>;
   listRegistered(): string[];
+  async describe(
+    name: string,
+    taskDefinitions?: Record<string, TaskDefinition>,
+  ): Promise<TaskDescription>;
 }
 ```
 
@@ -332,6 +336,56 @@ class TaskRegistry {
 | `resolve(nameOrPath)` | Look up a constructor. Falls back to dynamic filesystem import. |
 | `create(nameOrPath, ctx, opts)` | Resolve + instantiate in one call; omitted phase defaults to `task` |
 | `listRegistered()` | Return all registered names and class paths |
+| `describe(name, defs?)` | Class metadata folded with the configured definition. See below |
+
+**`TaskDescription`**
+
+```typescript
+interface TaskDescription {
+  name: string;
+  class_path: string;
+  description?: string;                 // definition, else the class's static description
+  group?: string;
+  options: Record<string, unknown>;     // schema defaults, then definition options (uninterpolated)
+  options_schema?: OptionSpecs;         // class optionsSchema refined by definition options_schema
+  outputs?: OutputSpecs;
+  idempotent?: boolean;
+  reversible?: boolean;
+}
+```
+
+**Option schemas**
+
+```typescript
+type OptionSpecs = Record<string, OptionSpec>;
+interface OptionSpec {
+  type?: OptionType | OptionType[]; // 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array' | 'null'
+  description?: string;
+  required?: boolean;
+  default?: unknown;
+  enum?: unknown[];
+  const?: unknown;
+  minimum?: number; maximum?: number; exclusiveMinimum?: number; exclusiveMaximum?: number;
+  minLength?: number; maxLength?: number; pattern?: string;
+  minItems?: number; maxItems?: number; items?: Record<string, unknown>;
+  properties?: Record<string, unknown>; additionalProperties?: boolean | Record<string, unknown>;
+  nullable?: boolean;
+}
+type OutputSpecs = Record<string, { type?: OptionType | OptionType[]; description?: string; items?: object; properties?: object }>;
+
+class TaskOptionsError extends Error {
+  readonly taskName: string;
+  readonly issues: { option: string; message: string }[];
+}
+
+function validateTaskOptions(specs: OptionSpecs | undefined, options: Record<string, unknown>): TaskOptionIssue[];
+function assertTaskOptions(taskName: string, specs: OptionSpecs | undefined, options: Record<string, unknown>): Record<string, unknown>; // defaults applied; throws TaskOptionsError
+function applyOptionDefaults(specs: OptionSpecs | undefined, options: Record<string, unknown>): Record<string, unknown>;
+function mergeOptionSpecs(base?: OptionSpecs, override?: OptionSpecs): OptionSpecs | undefined;
+function taskClassMetadata(ctor: unknown): TaskClassMetadata; // { description?, optionsSchema?, outputs? }
+```
+
+Zod: `OptionSpecSchema`, `OptionSpecsSchema`, `OutputSpecSchema`, `OutputSpecsSchema`.
 
 **`TaskConstructor`**
 
@@ -361,6 +415,8 @@ Orchestration engine that executes flows.
 class FlowRunner {
   constructor(config: FlowRunnerConfig);
   async run(options: FlowRunOptions): Promise<FlowRunResult>;
+  async runTask(taskName: string, options?: Record<string, unknown>): Promise<TaskResult>;
+  async describeTask(taskName: string): Promise<TaskDescription>;
   resolveExecutionPlan(
     flow: FlowDefinition,
     skipSet: Set<string>,

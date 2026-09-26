@@ -10,7 +10,13 @@ import type {
   ExecutionPhase,
 } from '../task/base-task.js';
 import { DEFAULT_EXECUTION_PHASE } from '../task/base-task.js';
-import type { TaskRegistry, TaskConstructor } from '../task/registry.js';
+import type { TaskRegistry, TaskConstructor, TaskDescription } from '../task/registry.js';
+import {
+  assertTaskOptions,
+  mergeOptionSpecs,
+  taskClassMetadata,
+  TaskOptionsError,
+} from '../task/options-schema.js';
 import { AgentTask, type AgentTaskOptions } from '../task/agent-task.js';
 import type { TokenLedger } from '../task/token-ledger.js';
 import { resolveReferences, type ReferenceContext } from '../references.js';
@@ -407,7 +413,15 @@ export class FlowRunner {
     } catch (err) {
       return { success: false, error: err instanceof Error ? err : new Error(String(err)) };
     }
-    return this.executeTask(resolved.classPath, resolved.options, refs);
+    return this.executeTask(resolved.classPath, resolved.options, refs, DEFAULT_EXECUTION_PHASE, taskName);
+  }
+
+  /**
+   * Describe a configured (or registered) task: its class, merged default
+   * options, option schema and outputs. See `TaskRegistry.describe`.
+   */
+  async describeTask(taskName: string): Promise<TaskDescription> {
+    return this.registry.describe(taskName, this.tasks);
   }
 
   /**
@@ -419,16 +433,30 @@ export class FlowRunner {
    * as a step, directly, as a tool, or during rollback all report failure
    * identically — and a step's `retries` cover construction, not just execution.
    * Task-to-task calls derive their equivalent context in `BaseTask.resolve`.
+   *
+   * `taskName` is the configured name the call came through. When given, the
+   * task's declared options (class `optionsSchema` refined by the definition's
+   * `options_schema`) supply defaults and are checked here, so every runner
+   * path validates the same way and a bad option fails before the task exists.
    */
   private async executeTask(
     classPath: string,
     options: Record<string, unknown>,
     references: ReferenceContext,
     executionPhase: ExecutionPhase = DEFAULT_EXECUTION_PHASE,
+    taskName?: string,
   ): Promise<TaskResult> {
     const taskCtx = this.contextFor(references, executionPhase);
     try {
-      const task = await this.registry.create(classPath, taskCtx, options);
+      let finalOptions = options;
+      if (taskName !== undefined) {
+        const specs = mergeOptionSpecs(
+          taskClassMetadata(await this.registry.resolve(classPath)).optionsSchema,
+          this.tasks[taskName]?.options_schema,
+        );
+        finalOptions = assertTaskOptions(taskName, specs, options);
+      }
+      const task = await this.registry.create(classPath, taskCtx, finalOptions);
       return task.run();
     } catch (err) {
       return { success: false, error: err instanceof Error ? err : new Error(String(err)) };
@@ -1015,6 +1043,8 @@ export class FlowRunner {
         errorCtx,
       );
       if (lastResult.success) return { result: lastResult, attempts: attempt };
+      // Bad options fail the same way every time; retrying cannot help.
+      if (lastResult.error instanceof TaskOptionsError) return { result: lastResult, attempts: attempt };
 
       const errMsg = lastResult.error?.message ?? '';
       const retryMatches = retryOn == null || errMsg.includes(retryOn);
@@ -1083,6 +1113,7 @@ export class FlowRunner {
       mergedOptions,
       refCtx,
       step.phase ?? DEFAULT_EXECUTION_PHASE,
+      step.name,
     );
   }
 
@@ -1109,6 +1140,7 @@ export class FlowRunner {
           resolved.options,
           this.baseReferences,
           'rollback',
+          rec.taskName,
         );
         if (r.success) {
           result.succeeded++;
