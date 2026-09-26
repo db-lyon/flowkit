@@ -314,6 +314,27 @@ export interface PlanStep {
   replaced_by?: string;
 }
 
+/**
+ * A `${steps.<id>...}` reference in a flow that cannot be bound to exactly one
+ * earlier step. See `FlowRunner.checkStepReferences`.
+ */
+export interface StepReferenceIssue {
+  flowName: string;
+  /** The step whose configuration holds the reference. */
+  stepNumber: number;
+  /** For a hook step: its phase. */
+  phase?: HookPhase;
+  /** The reference as written, e.g. `${steps.deploy.url}`. */
+  reference: string;
+  /**
+   * `ambiguous`: a name used by more than one main step. `unknown`: no main
+   * step has that number or name. `forward`: the step has not run yet at that
+   * point (itself or a later one).
+   */
+  kind: 'ambiguous' | 'unknown' | 'forward';
+  message: string;
+}
+
 /** A flow as `FlowRunner.describeFlow` reports it. */
 export interface FlowDescription {
   name: string;
@@ -384,6 +405,13 @@ export interface FlowRunnerConfig {
    * the flow says. See `FlowRunOptions.optionsScope`. Default `flat`.
    */
   optionsScope?: OptionsScope;
+  /**
+   * Refuse to run (or plan) a flow with a `${steps.<id>}` reference that is
+   * ambiguous, unknown or forward, instead of letting it resolve at run time
+   * to the most recent step of that name, or fail when reached. Checked for the
+   * flow a run starts on and every flow nested under it. Default false.
+   */
+  strictStepReferences?: boolean;
 }
 
 /**
@@ -429,6 +457,7 @@ export class FlowRunner {
   private agents: Record<string, AgentDefinition>;
   private nestedAgentTaskFactory: NestedAgentTaskFactory;
   private optionsScope: OptionsScope;
+  private strictStepReferences: boolean;
   private runDepth = 0;
   /**
    * Reference scope outside any step: the host namespaces, no step results.
@@ -448,6 +477,7 @@ export class FlowRunner {
     this.baseReferences = { steps: [], namespaces: this.references };
     this.agents = config.agents ?? {};
     this.optionsScope = config.optionsScope ?? 'flat';
+    this.strictStepReferences = config.strictStepReferences ?? false;
     this.nestedAgentTaskFactory =
       config.nestedAgentTaskFactory ?? ((ctx, options) => new AgentTask(ctx, options));
 
@@ -989,6 +1019,63 @@ export class FlowRunner {
     }
   }
 
+  /**
+   * Find `${steps.<id>...}` references that cannot be bound to exactly one
+   * earlier main step: ambiguous names, unknown ids and forward references.
+   * Scans the flow's main and hook steps (`options` of task steps, `when`, and
+   * check `when`s) and, recursively, every flow they nest. It does not scan
+   * task definition defaults, which are resolved in whatever step runs them.
+   */
+  checkStepReferences(flowName: string): StepReferenceIssue[] {
+    const issues: StepReferenceIssue[] = [];
+    this.collectReferenceIssues(flowName, new Set(), issues);
+    return issues;
+  }
+
+  private collectReferenceIssues(flowName: string, seen: Set<string>, issues: StepReferenceIssue[]): void {
+    const flow = this.flows[flowName];
+    if (!flow || seen.has(flowName)) return;
+    seen.add(flowName);
+    const main = this.resolveExecutionPlan(flow, new Set());
+    const byName = new Map<string, number[]>();
+    for (const st of main) {
+      if (st.name === 'None') continue;
+      byName.set(st.name, [...(byName.get(st.name) ?? []), st.stepNumber]);
+    }
+    const numbers = new Set(main.filter((st) => st.name !== 'None').map((st) => st.stepNumber));
+
+    const scan = (st: PlanStep): void => {
+      const texts: unknown[] = [st.when, ...(st.checks ?? []).map((c) => c.when)];
+      // A flow step's options are overrides for tasks inside the child flow and
+      // resolve against the child's steps, not this flow's.
+      if (st.type === 'task') texts.push(st.options);
+      for (const ref of stepReferencesIn(texts)) {
+        const issue = bindStepReference(ref, st, byName, numbers);
+        if (issue) {
+          issues.push({
+            flowName,
+            stepNumber: st.stepNumber,
+            ...(st.phase ? { phase: st.phase } : {}),
+            reference: `\${steps.${ref}}`,
+            ...issue,
+          });
+        }
+      }
+    };
+    for (const st of main) {
+      if (st.name === 'None') continue;
+      scan(st);
+      if (st.type === 'flow') this.collectReferenceIssues(st.name, seen, issues);
+    }
+    for (const phase of ['on_start', 'on_success', 'on_failure', 'finally'] as const) {
+      for (const st of this.planHookSteps(flow[phase], phase, new Set(), 0)) {
+        if (st.name === 'None') continue;
+        scan(st);
+        if (st.type === 'flow') this.collectReferenceIssues(st.name, seen, issues);
+      }
+    }
+  }
+
   /** Reject step-scoped `params` that address nothing or are not option objects. */
   private checkScopedParams(flowName: string, params: Record<string, unknown> | undefined): void {
     if (!params) return;
@@ -1379,6 +1466,18 @@ export class FlowRunner {
         this.checkScopedParams(options.flowName, options.params);
       } catch (err) {
         return { success: false, steps: [], duration: Date.now() - startTime, error: err as Error };
+      }
+    }
+    if (!inheritedFrame && this.strictStepReferences) {
+      const issues = this.checkStepReferences(options.flowName);
+      if (issues.length > 0) {
+        const detail = issues.map((i) => `${i.flowName} step ${i.stepNumber}: ${i.message}`).join('; ');
+        return {
+          success: false,
+          steps: [],
+          duration: Date.now() - startTime,
+          error: new Error(`Unbindable step references: ${detail}`),
+        };
       }
     }
 
@@ -2059,6 +2158,64 @@ export class FlowRunner {
 
     return result;
   }
+}
+
+const STEP_REF = /\$\{steps\.([^}]+)\}/g;
+
+/** Every `${steps.<ref>}` body in the strings found anywhere inside `values`. */
+function stepReferencesIn(values: unknown[]): string[] {
+  const out: string[] = [];
+  const walk = (v: unknown): void => {
+    if (typeof v === 'string') {
+      for (const m of v.matchAll(STEP_REF)) out.push(m[1]!);
+    } else if (Array.isArray(v)) {
+      v.forEach(walk);
+    } else if (v && typeof v === 'object' && Object.getPrototypeOf(v) === Object.prototype) {
+      Object.values(v).forEach(walk);
+    }
+  };
+  values.forEach(walk);
+  return out;
+}
+
+/**
+ * Bind one reference the way the resolver does (longest id prefix first,
+ * a number is a step number, anything else a step name) and report why it
+ * cannot be bound to exactly one earlier main step.
+ */
+function bindStepReference(
+  ref: string,
+  from: PlanStep,
+  byName: Map<string, number[]>,
+  numbers: Set<number>,
+): Pick<StepReferenceIssue, 'kind' | 'message'> | undefined {
+  const segments = ref.split('.');
+  // Hook steps run after every main step that ran.
+  const before = (n: number) => from.phase !== undefined || n < from.stepNumber;
+  for (let i = segments.length; i >= 1; i--) {
+    const id = segments.slice(0, i).join('.');
+    if (/^\d+$/.test(id)) {
+      const n = Number(id);
+      if (!numbers.has(n)) return { kind: 'unknown', message: `\${steps.${ref}} names step ${id}, which does not exist` };
+      if (!before(n)) {
+        return { kind: 'forward', message: `\${steps.${ref}} names step ${id}, which has not run yet` };
+      }
+      return undefined;
+    }
+    const matches = byName.get(id);
+    if (!matches) continue;
+    if (matches.length > 1) {
+      return {
+        kind: 'ambiguous',
+        message: `\${steps.${ref}}: "${id}" is the name of steps ${matches.join(', ')}; reference one by number`,
+      };
+    }
+    if (!before(matches[0]!)) {
+      return { kind: 'forward', message: `\${steps.${ref}}: step "${id}" has not run yet` };
+    }
+    return undefined;
+  }
+  return { kind: 'unknown', message: `\${steps.${ref}} matches no step number or name in the flow` };
 }
 
 /**

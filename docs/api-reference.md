@@ -473,6 +473,7 @@ class FlowRunner {
   async runTask(taskName: string, options?: Record<string, unknown>): Promise<TaskResult>;
   async describeTask(taskName: string): Promise<TaskDescription>;
   describeFlow(flowName: string): FlowDescription;
+  checkStepReferences(flowName: string): StepReferenceIssue[];
   async expandTask(taskName: string, options?: Record<string, unknown>): Promise<ChildPlanEntry[] | null>;
   async preflight(
     flowName: string,
@@ -487,6 +488,19 @@ class FlowRunner {
 ```
 
 ---
+
+**`StepReferenceIssue`**
+
+```typescript
+interface StepReferenceIssue {
+  flowName: string;
+  stepNumber: number;
+  phase?: HookPhase;
+  reference: string;                          // e.g. '${steps.deploy.url}'
+  kind: 'ambiguous' | 'unknown' | 'forward';
+  message: string;
+}
+```
 
 **Checks and preflight**
 
@@ -576,6 +590,7 @@ interface FlowRunnerConfig {
   agents?: Record<string, AgentDefinition>;
   nestedAgentTaskFactory?: NestedAgentTaskFactory;
   optionsScope?: 'flat' | 'step'; // default for how `params` reach steps; default 'flat'
+  strictStepReferences?: boolean; // refuse ambiguous/unknown/forward ${steps.x}; default false
 }
 ```
 

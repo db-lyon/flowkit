@@ -9,6 +9,7 @@ export type {
   NestedAgentTaskFactory,
   PlanStep,
   FlowDescription,
+  StepReferenceIssue,
   CheckOutcome,
   PreflightStep,
   PreflightResult,

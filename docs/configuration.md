@@ -185,6 +185,43 @@ flows:
 
 References resolve just before the step runs, against the results of already-completed steps in the current flow. Nested flows have their own reference scope — they don't see their parent flow's steps.
 
+#### Binding by identity, and the uniqueness rule
+
+A reference names a step by **identity**, its number or its task name, never by
+position relative to the referencing step. That is why step numbers are worth
+keeping stable (and gapped: `10`, `20`, `30`): an overlay that inserts step `15`
+changes no reference.
+
+- A number binds to exactly one step. Prefer it whenever a task runs more than
+  once in a flow.
+- A name binds to the step running that task. When several main steps run the
+  same task, the runtime rule is the one above: the most recently completed
+  one wins. That is well defined but fragile, because which one is "most
+  recent" depends on where the referencing step sits.
+- The same resolution applies in `when:` and in check `when`s. Hook steps see
+  every main step that ran. A flow step's `options` are overrides for the
+  tasks inside the nested flow, and references in them resolve against the
+  nested flow's steps.
+
+Set `strictStepReferences: true` on the `FlowRunner` to make the uniqueness
+rule an error instead: a run or plan refuses to start, naming each reference,
+when a `${steps.<id>}` in a step's options, `when` or checks is **ambiguous** (a
+name used by more than one main step), **unknown** (no such number or name) or
+**forward** (the step has not run yet at that point). The check covers the flow
+a run starts on and every flow nested under it. It is opt-in because a config
+that relies on "most recent wins" would otherwise stop running.
+`runner.checkStepReferences(flowName)` returns the same findings without
+enforcing them, for a linter or a `describe` command:
+
+```typescript
+runner.checkStepReferences('release');
+// [{ flowName: 'release', stepNumber: 3, reference: '${steps.deploy.url}', kind: 'ambiguous',
+//    message: '${steps.deploy.url}: "deploy" is the name of steps 1, 2; reference one by number' }]
+```
+
+Task definition defaults are not scanned: they resolve in whichever step runs
+the task.
+
 ### Flow-level hooks
 
 A flow can attach steps that run around the main step sequence, keyed by flow outcome:
