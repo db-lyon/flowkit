@@ -3,6 +3,7 @@ import * as path from 'node:path';
 import * as yaml from 'js-yaml';
 import type { z } from 'zod';
 import { deepMerge } from './deep-merge.js';
+import { assertKnownKeys, type FindUnknownKeysOptions } from './strict.js';
 
 /**
  * Walk up parent directories looking for `filename`.
@@ -38,6 +39,16 @@ export interface LoadConfigOptions<T extends z.ZodType> {
   envVar?: string;
   /** Directory to search for config files (default: cwd) */
   configDir?: string;
+  /**
+   * Reject keys the schema does not declare, anywhere in the merged config,
+   * with an `UnknownConfigKeyError` naming each one by path. Off by default:
+   * zod's usual behaviour is to drop them silently.
+   *
+   * Pass an object to name top-level sections the check should leave alone
+   * (`{ passthroughKeys: ['bridge', 'editor'] }`). A section the host declares
+   * in its own schema is checked like the engine's, and needs no listing.
+   */
+  strict?: boolean | FindUnknownKeysOptions;
 }
 
 export interface LoadedConfig<T> {
@@ -84,6 +95,10 @@ export function loadConfig<T extends z.ZodType>(
   const localPath = path.join(configDir, `${base}.local${ext}`);
   if (fs.existsSync(localPath)) {
     config = deepMerge(config, loadRawYaml(localPath));
+  }
+
+  if (options.strict) {
+    assertKnownKeys(options.schema, config, options.strict === true ? {} : options.strict);
   }
 
   return { config: options.schema.parse(config), configDir };

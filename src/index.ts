@@ -25,6 +25,8 @@ export type {
 } from './config/schema.js';
 export { loadConfig, loadRawYaml, findConfigFile } from './config/loader.js';
 export type { LoadConfigOptions, LoadedConfig } from './config/loader.js';
+export { findUnknownKeys, assertKnownKeys, UnknownConfigKeyError } from './config/strict.js';
+export type { UnknownConfigKey, FindUnknownKeysOptions } from './config/strict.js';
 
 // Task
 export { BaseTask, DEFAULT_EXECUTION_PHASE, resolveTaskContext } from './task/base-task.js';

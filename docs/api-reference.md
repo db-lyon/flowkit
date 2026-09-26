@@ -26,6 +26,7 @@ function loadConfig<T extends z.ZodType>(
 | `env` | `string` | no | Environment name — loads `{base}.{env}.{ext}` overlay |
 | `envVar` | `string` | no | Env var to read environment name from when `env` is not passed |
 | `configDir` | `string` | no | Directory to search (default: `process.cwd()`) |
+| `strict` | `boolean \| { passthroughKeys?: string[] }` | no | Reject keys the schema does not declare, with an `UnknownConfigKeyError`. Off by default. See [Strict validation](configuration.md#strict-validation) |
 
 **`LoadedConfig<T>`**
 
@@ -33,6 +34,31 @@ function loadConfig<T extends z.ZodType>(
 |-------|------|-------------|
 | `config` | `T` | The validated, merged configuration object |
 | `configDir` | `string` | The directory the config was loaded from |
+
+---
+
+### `findUnknownKeys(schema, value, options?)` / `assertKnownKeys(schema, value, options?)`
+
+The check behind `loadConfig({ strict })`, for config that does not come
+through the loader.
+
+```typescript
+interface UnknownConfigKey {
+  path: string;        // e.g. 'flows.ci.steps.2.retires', 'tasks["asset.list"].x'
+  key: string;
+  suggestion?: string; // nearest declared key, when close enough to be a typo
+}
+interface FindUnknownKeysOptions {
+  passthroughKeys?: readonly string[]; // top-level keys left unchecked
+}
+
+function findUnknownKeys(schema: z.ZodTypeAny, value: unknown, options?: FindUnknownKeysOptions): UnknownConfigKey[];
+function assertKnownKeys(schema: z.ZodTypeAny, value: unknown, options?: FindUnknownKeysOptions): void; // throws UnknownConfigKeyError
+
+class UnknownConfigKeyError extends Error {
+  readonly keys: UnknownConfigKey[];
+}
+```
 
 ---
 

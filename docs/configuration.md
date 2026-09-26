@@ -317,6 +317,46 @@ Result: `['eslint', 'prettier', 'my-custom-plugin']`
 
 The `__merge` annotation is stripped from the final array.
 
+## Strict validation
+
+Zod drops keys a schema does not declare, so a typo such as `retires: 3` or
+`ignore_failur: true` loads cleanly and then does nothing. Pass `strict` to
+make the loader reject them instead:
+
+```typescript
+const { config } = loadConfig({
+  filename: 'pipeline.yml',
+  schema: EngineConfigSchema,
+  strict: true,
+});
+// UnknownConfigKeyError: Unknown config key:
+//   flows.ci.steps.2.retires (did you mean "retries"?)
+```
+
+The check runs on the merged layers, before the schema parses them, and walks
+the schema you pass: tasks, flows, steps, hook steps, agents, agent tools and
+budgets, plus any section a host adds with `EngineConfigSchema.extend(...)`.
+Free-form maps (`options`, an agent's `schema`, a tool's `parameters`) are not
+checked, and neither is any object schema declared `.passthrough()` or with a
+`.catchall()`.
+
+A host that keeps sections in the same file but does not declare them in the
+schema it passes lists them as `passthroughKeys`. Only top-level keys can be
+exempted this way:
+
+```typescript
+loadConfig({
+  filename: 'ue-mcp.yml',
+  schema: HostConfigSchema,
+  strict: { passthroughKeys: ['bridge', 'editor'] },
+});
+```
+
+Strict validation is opt-in. Without `strict`, unknown keys are dropped
+exactly as before. `findUnknownKeys(schema, value)` and
+`assertKnownKeys(schema, value)` run the same check on config that does not
+come through `loadConfig`.
+
 ## Finding config files
 
 `findConfigFile()` walks up parent directories to locate a file:

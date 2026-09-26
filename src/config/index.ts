@@ -27,3 +27,5 @@ export type {
 
 export { loadConfig, loadRawYaml, findConfigFile } from './loader.js';
 export type { LoadConfigOptions, LoadedConfig } from './loader.js';
+export { findUnknownKeys, assertKnownKeys, UnknownConfigKeyError } from './strict.js';
+export type { UnknownConfigKey, FindUnknownKeysOptions } from './strict.js';
