@@ -1,7 +1,8 @@
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import {
-  BaseTask,
+  type BaseTask,
+  extendsBaseTask,
   resolveTaskContext,
   type TaskContext,
   type TaskContextInput,
@@ -153,7 +154,7 @@ export class TaskRegistry {
       );
     }
 
-    if (!(TaskClass.prototype instanceof BaseTask)) {
+    if (!extendsBaseTask(TaskClass)) {
       throw new Error(`Task class from "${resolvedPath}" does not extend BaseTask`);
     }
 

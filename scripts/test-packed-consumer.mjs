@@ -19,15 +19,18 @@ function runNpm(args, cwd) {
 }
 
 try {
+  // npm 11 prints an array of packed entries, npm 12 an object keyed by package name.
   const pack = JSON.parse(runNpm(['pack', '--pack-destination', workspace, '--json'], root));
-  const tarball = join(workspace, pack[0].filename);
+  const [packed] = Array.isArray(pack) ? pack : Object.values(pack);
+  const tarball = join(workspace, packed.filename);
   writeFileSync(
     join(workspace, 'package.json'),
     JSON.stringify({ name: 'flowkit-packed-consumer-check', private: true, type: 'module' }),
   );
+  // types: [] keeps tsc from adopting @types found in ancestors of the temp dir.
   writeFileSync(
     join(workspace, 'tsconfig.json'),
-    JSON.stringify({ compilerOptions: { target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext', strict: true, noEmit: true }, include: ['index.ts'] }),
+    JSON.stringify({ compilerOptions: { target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext', strict: true, noEmit: true, types: [] }, include: ['index.ts'] }),
   );
   writeFileSync(
     join(workspace, 'index.ts'),
