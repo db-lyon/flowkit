@@ -24,6 +24,13 @@ import {
   TaskOptionsError,
 } from '../task/options-schema.js';
 import { deprecationWarning, mergeWarnings, type RunWarning } from '../task/warnings.js';
+import type {
+  ChildPlanEntry,
+  ChildStepSpec,
+  ChildStepTarget,
+  ExpandContext,
+  ExpandFunction,
+} from '../task/composite.js';
 import { AgentTask, type AgentTaskOptions } from '../task/agent-task.js';
 import type { TokenLedger } from '../task/token-ledger.js';
 import { resolveReferences, type ReferenceContext } from '../references.js';
@@ -82,6 +89,12 @@ export interface FlowRunOptions {
    * flat, one-line-per-flow-step plan.
    */
   expandNestedFlows?: boolean;
+  /**
+   * Plan mode only: expand composite task steps whose class declares a static
+   * `expand` into the children it reports, each with a hierarchical `path`.
+   * A composite whose `expand` returns `null` is marked `composite: 'opaque'`.
+   */
+  expandComposites?: boolean;
   /**
    * Internal. Set by the runner on a nested run when an ancestor flow has
    * rollback armed and will therefore invoke this child's records itself.
@@ -214,6 +227,8 @@ export interface FlowStepResult {
    * child's run error message as the only thing that crosses the boundary.
    */
   nestedSteps?: FlowStepResult[];
+  /** For a composite's child step (`TaskResult.children`): its path, e.g. `2/1`. */
+  path?: string;
 }
 
 export interface HookError {
@@ -287,6 +302,12 @@ export interface PlanStep {
   path?: string;
   /** Nesting depth — 0 for top-level, increments per expanded nested flow. */
   depth?: number;
+  /**
+   * Plan mode with `expandComposites`: `expanded` when the task's `expand`
+   * listed its children (the rows that follow, one level deeper), `opaque` when
+   * it declared `expand` but could not say.
+   */
+  composite?: 'expanded' | 'opaque';
   /** Plan mode only: the step's task or flow is deprecated. */
   deprecated?: boolean | string;
   /** Plan mode only: the deprecated target's declared replacement. */
@@ -363,6 +384,23 @@ export interface FlowRunnerConfig {
    * the flow says. See `FlowRunOptions.optionsScope`. Default `flat`.
    */
   optionsScope?: OptionsScope;
+}
+
+/**
+ * Where one task invocation sits, for the bookkeeping of its composite
+ * children. Internal.
+ */
+interface InvocationSite {
+  /** The invocation's step path (`2`, `2/1`); `''` for a direct `runTask`. */
+  path: string;
+  /** An enclosing flow has rollback armed and will unwind child records itself. */
+  rollbackOwned: boolean;
+}
+
+/** Collects the child steps one task invocation runs through `ctx.step`. Internal. */
+interface ChildSink extends InvocationSite {
+  children: FlowStepResult[];
+  references: ReferenceContext;
 }
 
 /**
@@ -460,6 +498,7 @@ export class FlowRunner {
   private contextFor(
     references: ReferenceContext,
     executionPhase: ExecutionPhase = DEFAULT_EXECUTION_PHASE,
+    sink?: ChildSink,
   ): TaskContext {
     return {
       ...this.ctx,
@@ -467,7 +506,102 @@ export class FlowRunner {
       executionPhase,
       runAgent: (agentName, input, depth, ledger) =>
         this.runAgentTool(agentName, input, depth, ledger, references),
+      ...(sink
+        ? {
+            step: (target: ChildStepTarget, options?: Record<string, unknown>, spec?: ChildStepSpec) =>
+              this.runChildStep(sink, target, options ?? {}, spec),
+          }
+        : {}),
     };
+  }
+
+  /**
+   * Run one composite child through the same machinery as a flow step: hooks,
+   * retries, option schema, deprecation and rollback capture. The child is
+   * recorded on the parent's sink and becomes `TaskResult.children`.
+   *
+   * A child's options are the composite's runtime data: they layer over the
+   * child task's configured defaults (interpolated in the parent's reference
+   * scope) verbatim. Runtime `params` and enclosing-flow overrides do not
+   * reach children, and a child flow gets `options` as its `params`.
+   */
+  private async runChildStep(
+    sink: ChildSink,
+    target: ChildStepTarget,
+    options: Record<string, unknown>,
+    spec: ChildStepSpec | undefined,
+  ): Promise<TaskResult> {
+    const stepNumber = sink.children.length + 1;
+    const isFlow = typeof target === 'object' && 'flow' in target;
+    const name = typeof target === 'string' ? target : 'flow' in target ? target.flow : target.task;
+    const path = sink.path ? `${sink.path}/${stepNumber}` : String(stepNumber);
+    const planStep: PlanStep = {
+      stepNumber,
+      type: isFlow ? 'flow' : 'task',
+      name,
+      skipped: false,
+      options,
+      ...(spec?.retries !== undefined ? { retries: spec.retries } : {}),
+      ...(spec?.retryDelay !== undefined ? { retryDelay: spec.retryDelay } : {}),
+      ...(spec?.retryOn !== undefined ? { retryOn: spec.retryOn } : {}),
+      path,
+      depth: path.split('/').length - 1,
+    };
+    // Claim the slot before running, so a composite that runs children
+    // concurrently still numbers them in the order it asked.
+    const record: FlowStepResult = { stepNumber, type: planStep.type, name, skipped: false, duration: 0, path };
+    sink.children.push(record);
+
+    await this.hooks.beforeStep?.(planStep);
+    const start = Date.now();
+    if (isFlow) {
+      if (!this.flows[name]) {
+        record.result = { success: false, error: new Error(`Flow "${name}" not found in configuration`) };
+      } else {
+        // A child flow is never the top of a run, even under a bare runTask.
+        this.runDepth++;
+        try {
+          const nested = await this.runWith(
+            { flowName: name, params: options, rollbackOwnedByAncestor: sink.rollbackOwned },
+            {},
+          );
+          record.result = {
+            success: nested.success,
+            data: { stepCount: nested.steps.length },
+            error: nested.success ? undefined : nested.error,
+            ...(nested.warnings ? { warnings: nested.warnings } : {}),
+          };
+          record.nestedSteps = nested.steps;
+          if (nested.checks) record.checks = nested.checks;
+        } catch (err) {
+          record.result = { success: false, error: err instanceof Error ? err : new Error(String(err)) };
+        } finally {
+          this.runDepth--;
+        }
+      }
+    } else {
+      const { result, attempts } = await this.withRetry(planStep, async () => {
+        let resolved: ResolvedTask;
+        try {
+          resolved = resolveTaskCall(name, this.tasks, options, sink.references);
+        } catch (err) {
+          return { success: false, error: err instanceof Error ? err : new Error(String(err)) };
+        }
+        return this.executeTask(
+          resolved.classPath,
+          resolved.options,
+          sink.references,
+          DEFAULT_EXECUTION_PHASE,
+          name,
+          { path, rollbackOwned: sink.rollbackOwned },
+        );
+      });
+      record.result = result;
+      record.attempts = attempts;
+    }
+    record.duration = Date.now() - start;
+    await this.hooks.afterStep?.(planStep, record);
+    return record.result!;
   }
 
   /** Map an agent definition onto AgentTask options (everything but the prompt). */
@@ -598,6 +732,98 @@ export class FlowRunner {
   }
 
   /**
+   * The children a composite task would run for `options`, from its class's
+   * static `expand`, without running anything. `options` layer over the task's
+   * configured defaults as `runTask` would layer them. Returns `null` when the
+   * class declares no `expand` or its `expand` cannot say.
+   */
+  async expandTask(
+    taskName: string,
+    options: Record<string, unknown> = {},
+  ): Promise<ChildPlanEntry[] | null> {
+    const { classPath, options: defaults } = resolveTaskDefinition(taskName, this.tasks);
+    const expand = await this.expandFunctionOf(classPath);
+    if (!expand) return null;
+    const merged = lenientReferences({ ...defaults, ...options }, this.baseReferences);
+    return (await expand(merged, this.expandContext(taskName))) ?? null;
+  }
+
+  private expandContext(taskName: string): ExpandContext {
+    return {
+      taskName,
+      taskDefinitions: this.tasks,
+      flows: this.flows,
+      ...(this.references ? { references: this.references } : {}),
+    };
+  }
+
+  /** A task class's static `expand`, or undefined (including when the class cannot load). */
+  private async expandFunctionOf(classPath: string): Promise<ExpandFunction | undefined> {
+    try {
+      const ctor = (await this.registry.resolve(classPath)) as unknown as { expand?: unknown };
+      return typeof ctor.expand === 'function' ? (ctor.expand.bind(ctor) as ExpandFunction) : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /**
+   * Plan mode: follow each composite task row with the children its `expand`
+   * reports, one level deeper, recursively. Options are resolved as far as
+   * they can be before a run: definition defaults, the step's options and its
+   * runtime params, with host references interpolated and step references left
+   * as written.
+   */
+  private async expandCompositeRows(
+    plan: PlanStep[],
+    params: Record<string, unknown> | undefined,
+    scope: OptionsScope,
+    ancestors: Set<string> = new Set(),
+  ): Promise<PlanStep[]> {
+    const out: PlanStep[] = [];
+    for (const row of plan) {
+      out.push(row);
+      if (row.type !== 'task' || row.skipped || ancestors.has(row.name)) continue;
+      const { classPath, options: defaults } = resolveTaskDefinition(row.name, this.tasks);
+      const expand = await this.expandFunctionOf(classPath);
+      if (!expand) continue;
+      const path = row.path ?? String(row.stepNumber);
+      let runtime: Record<string, unknown> | undefined = params;
+      if (scope === 'step' && params) {
+        runtime = {
+          ...(params[row.name] as Record<string, unknown> | undefined),
+          ...(params[path] as Record<string, unknown> | undefined),
+        };
+      }
+      const raw = { ...defaults, ...(row.options ?? {}), ...(ancestors.size === 0 ? runtime : {}) };
+      let entries: ChildPlanEntry[] | null = null;
+      try {
+        entries = await expand(lenientReferences(raw, this.baseReferences), this.expandContext(row.name));
+      } catch (err) {
+        this.logger.warn({ task: row.name, err }, `expand() failed for ${row.name}; shown as opaque`);
+      }
+      if (!entries) {
+        row.composite = 'opaque';
+        continue;
+      }
+      row.composite = 'expanded';
+      row.path = path;
+      row.depth = row.depth ?? 0;
+      const children: PlanStep[] = entries.map((entry, i) => ({
+        stepNumber: i + 1,
+        type: 'flow' in entry ? 'flow' : 'task',
+        name: 'flow' in entry ? entry.flow : entry.task,
+        skipped: false,
+        ...(entry.options ? { options: entry.options } : {}),
+        path: `${path}/${i + 1}`,
+        depth: row.depth! + 1,
+      }));
+      out.push(...(await this.expandCompositeRows(children, params, scope, new Set(ancestors).add(row.name))));
+    }
+    return out;
+  }
+
+  /**
    * The deprecation notice for a task or flow, or undefined. A task's class is
    * resolved for its static metadata; one that cannot load reports nothing
    * here and fails where it would have anyway, at run time.
@@ -653,8 +879,19 @@ export class FlowRunner {
     references: ReferenceContext,
     executionPhase: ExecutionPhase = DEFAULT_EXECUTION_PHASE,
     taskName?: string,
+    site: InvocationSite = { path: '', rollbackOwned: false },
   ): Promise<TaskResult> {
-    const taskCtx = this.contextFor(references, executionPhase);
+    const sink: ChildSink = { ...site, children: [], references };
+    const taskCtx = this.contextFor(references, executionPhase, sink);
+    const finish = (result: TaskResult): TaskResult => {
+      if (sink.children.length === 0) return result;
+      result.children = sink.children;
+      // A child's notices (a deprecated child task, say) surface on the parent,
+      // so a flow reports them like any step's.
+      const merged = mergeWarnings(result.warnings, ...sink.children.map((c) => c.result?.warnings));
+      if (merged.length > 0) result.warnings = merged;
+      return result;
+    };
     try {
       let finalOptions = options;
       let deprecation: RunWarning | undefined;
@@ -676,7 +913,7 @@ export class FlowRunner {
         }
       }
       const task = await this.registry.create(classPath, taskCtx, finalOptions);
-      return withWarnings(await task.run(), deprecation);
+      return finish(withWarnings(await task.run(), deprecation));
     } catch (err) {
       return { success: false, error: err instanceof Error ? err : new Error(String(err)) };
     }
@@ -1147,7 +1384,7 @@ export class FlowRunner {
 
     // Plan mode — dump all phases for visibility, nothing runs.
     if (options.plan) {
-      const mainPlan = options.expandNestedFlows
+      let mainPlan = options.expandNestedFlows
         ? executionPlan.flatMap((s) =>
             this.expandPlanStep(
               s,
@@ -1159,6 +1396,9 @@ export class FlowRunner {
             ),
           )
         : executionPlan;
+      if (options.expandComposites) {
+        mainPlan = await this.expandCompositeRows(mainPlan, options.params, frame.scope);
+      }
       const fullPlan: PlanStep[] = [
         ...this.planHookSteps(flow.on_start, 'on_start', skipSet, -3000),
         ...mainPlan,
@@ -1179,6 +1419,7 @@ export class FlowRunner {
           skipped: s.skipped,
           duration: 0,
           ...(s.path !== undefined ? { path: s.path, depth: s.depth } : {}),
+          ...(s.composite ? { composite: s.composite } : {}),
           ...(s.deprecated ? { deprecated: s.deprecated } : {}),
           ...(s.replaced_by !== undefined ? { replaced_by: s.replaced_by } : {}),
         })) as unknown as FlowStepResult[],
@@ -1371,6 +1612,11 @@ export class FlowRunner {
               this.runtimeOptionsFor(planStep, frame, options.params),
               completedSteps,
               parentOptions,
+              undefined,
+              {
+                path: this.stepPath(frame, planStep.stepNumber),
+                rollbackOwned: rollbackEnabled || ancestorOwnsRollback,
+              },
             );
             stepResult = {
               stepNumber: planStep.stepNumber,
@@ -1388,13 +1634,9 @@ export class FlowRunner {
             // is pushed last and performRollback walks the array backwards, so
             // the partial write is undone first and the earlier steps unwind
             // after it.
-            if (taskResult.rollback) {
-              rollbackRecords.push({
-                taskName: taskResult.rollback.taskName,
-                payload: taskResult.rollback.payload,
-                fromFailedStep: !taskResult.success,
-              });
-            }
+            // A composite's children ran before it finished, so their records
+            // go first and unwind after the composite's own.
+            harvestRollbacks(taskResult, rollbackRecords);
           } else {
             const childParentOptions = this.mergeParentOptions(parentOptions, planStep.options);
             const nestedResult = await this.runWith(
@@ -1428,13 +1670,7 @@ export class FlowRunner {
             // failing main step's does: the part that landed still needs
             // undoing, and the child is the only place that knows what it was.
             for (const s of nestedResult.steps) {
-              if (s.result?.rollback) {
-                rollbackRecords.push({
-                  taskName: s.result.rollback.taskName,
-                  payload: s.result.rollback.payload,
-                  fromFailedStep: !s.result.success,
-                });
-              }
+              if (s.type === 'task' && s.result) harvestRollbacks(s.result, rollbackRecords);
             }
           }
 
@@ -1681,6 +1917,17 @@ export class FlowRunner {
     completedSteps: FlowStepResult[],
     parentOptions: ParentOptions,
     errorCtx?: { error: Error; step?: string },
+    site?: InvocationSite,
+  ): Promise<{ result: TaskResult; attempts: number }> {
+    return this.withRetry(step, () =>
+      this.executeTaskStep(step, flowParams, completedSteps, parentOptions, errorCtx, site),
+    );
+  }
+
+  /** A step's retry policy (`retries`, `retryDelay`, `retryOn`) around one attempt function. */
+  private async withRetry(
+    step: Pick<PlanStep, 'stepNumber' | 'name' | 'retries' | 'retryDelay' | 'retryOn'>,
+    attemptOnce: () => Promise<TaskResult>,
   ): Promise<{ result: TaskResult; attempts: number }> {
     const maxAttempts = Math.max(1, 1 + (step.retries ?? 0));
     const delayMs = step.retryDelay ?? 0;
@@ -1689,13 +1936,7 @@ export class FlowRunner {
     let lastResult: TaskResult = { success: false, error: new Error('no attempts executed') };
 
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      lastResult = await this.executeTaskStep(
-        step,
-        flowParams,
-        completedSteps,
-        parentOptions,
-        errorCtx,
-      );
+      lastResult = await attemptOnce();
       if (lastResult.success) return { result: lastResult, attempts: attempt };
       // Bad options fail the same way every time; retrying cannot help.
       if (lastResult.error instanceof TaskOptionsError) return { result: lastResult, attempts: attempt };
@@ -1723,6 +1964,7 @@ export class FlowRunner {
     completedSteps: FlowStepResult[],
     parentOptions: ParentOptions,
     errorCtx?: { error: Error; step?: string },
+    site?: InvocationSite,
   ): Promise<TaskResult> {
     const taskDef = resolveTaskDefinition(step.name, this.tasks);
     // Precedence (low → high): task default → enclosing-flow override → step inline → runtime params.
@@ -1768,6 +2010,7 @@ export class FlowRunner {
       refCtx,
       step.phase ?? DEFAULT_EXECUTION_PHASE,
       step.name,
+      site,
     );
   }
 
@@ -1816,6 +2059,43 @@ export class FlowRunner {
 
     return result;
   }
+}
+
+/**
+ * Interpolate what can be interpolated before a run: host namespaces resolve,
+ * and anything that throws (a step reference, nothing having run) is left as
+ * written.
+ */
+function lenientReferences(value: Record<string, unknown>, refs: ReferenceContext): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(value)) {
+    try {
+      out[k] = resolveReferences(v, refs);
+    } catch {
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+/**
+ * Harvest a task result's rollback records, its composite children's first
+ * (recursively, child flows' steps included), then its own.
+ */
+function harvestRollbacks(result: TaskResult, into: HarvestedRollback[]): void {
+  for (const child of result.children ?? []) harvestStep(child, into);
+  if (result.rollback) {
+    into.push({
+      taskName: result.rollback.taskName,
+      payload: result.rollback.payload,
+      fromFailedStep: !result.success,
+    });
+  }
+}
+
+function harvestStep(step: FlowStepResult, into: HarvestedRollback[]): void {
+  if (step.result) harvestRollbacks(step.result, into);
+  for (const nested of step.nestedSteps ?? []) harvestStep(nested, into);
 }
 
 /** Status a set of evaluated checks gives a preflight row. Error beats skip beats unknown. */

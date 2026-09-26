@@ -351,6 +351,24 @@ their child steps, each annotated with a hierarchical `path` (e.g. `2/1`):
 await runner.run({ flowName: 'release', plan: true, expandNestedFlows: true });
 ```
 
+### Composite tasks
+
+A task whose children depend on its input runs each child with `this.step()`.
+Children go through the runner like flow steps (recorded under the parent,
+retried, validated, rolled back), under a flow or on their own via `runTask`.
+An optional static `expand()` lists the children for plans without running
+them. See [docs/custom-tasks.md](docs/custom-tasks.md#composite-tasks).
+
+```typescript
+async execute() {
+  for (const file of this.options.files) {
+    const r = await this.step('asset.import', { file });
+    if (!r.success) return r;
+  }
+  return { success: true };
+}
+```
+
 ### Lifecycle hooks
 
 Attach hooks to observe or react to flow execution:

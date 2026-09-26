@@ -22,6 +22,15 @@ export {
 export type { TaskClassMetadata, TaskOptionIssue } from './options-schema.js';
 export { deprecationWarning, mergeWarnings } from './warnings.js';
 export type { RunWarning, Deprecation } from './warnings.js';
+export { collectRollbackRecords } from './composite.js';
+export type {
+  ChildStepTarget,
+  ChildStepSpec,
+  ChildStepRunner,
+  ChildPlanEntry,
+  ExpandContext,
+  ExpandFunction,
+} from './composite.js';
 
 // Agent / LLM
 export { AgentPromptTask } from './agent-prompt-task.js';

@@ -171,8 +171,45 @@ abstract class BaseTask<TOpts = Record<string, unknown>> {
   abstract execute(): Promise<TaskResult>;
   protected validate(): void;
   async run(): Promise<TaskResult>;
+  protected resolve<T extends BaseTask>(taskName: string, options?: Record<string, unknown>): Promise<T>;
+  protected call(taskName: string, options?: Record<string, unknown>): Promise<TaskResult>;
+  protected step(
+    target: ChildStepTarget,
+    options?: Record<string, unknown>,
+    spec?: ChildStepSpec,
+  ): Promise<TaskResult>;
+
+  // Optional class-level declarations
+  static optionsSchema?: OptionSpecs;
+  static outputs?: OutputSpecs;
+  static description?: string;
+  static deprecated?: boolean | string;
+  static replacedBy?: string;
+  static expand?: ExpandFunction;
 }
+
+type ChildStepTarget = string | { task: string } | { flow: string };
+interface ChildStepSpec { retries?: number; retryDelay?: number; retryOn?: string }
+type ChildPlanEntry =
+  | { task: string; options?: Record<string, unknown> }
+  | { flow: string; options?: Record<string, unknown> };
+interface ExpandContext {
+  taskName: string;
+  taskDefinitions: Record<string, TaskDefinition>;
+  flows: Record<string, FlowDefinition>;
+  references?: Record<string, unknown>;
+}
+type ExpandFunction = (
+  options: Record<string, unknown>,
+  ctx: ExpandContext,
+) => ChildPlanEntry[] | null | Promise<ChildPlanEntry[] | null>;
+
+// Every rollback record in a result tree, children first; invoke in reverse.
+function collectRollbackRecords(result: TaskResult): RollbackRecord[];
 ```
+
+`step()` runs a composite child through the runner (`ctx.step`); see
+[Composite tasks](custom-tasks.md#composite-tasks).
 
 | Method | Description |
 |--------|-------------|
@@ -199,6 +236,8 @@ interface TaskContext {
   logger?: Logger;
   /** Cancels LLM work and retry backoff owned by this task invocation. */
   readonly signal?: AbortSignal;
+  /** Run one composite child through the runner. Supplied by FlowRunner. */
+  step?: (target: ChildStepTarget, options?: Record<string, unknown>, spec?: ChildStepSpec) => Promise<TaskResult>;
   [key: string]: unknown;
 }
 
@@ -246,6 +285,7 @@ interface TaskResult {
   duration?: number;  // milliseconds, set by run()
   rollback?: RollbackRecord;
   warnings?: RunWarning[]; // non-fatal notices; the runner appends deprecation warnings
+  children?: FlowStepResult[]; // composite child steps run through ctx.step, set by the runner
 }
 
 interface RunWarning {
@@ -433,6 +473,7 @@ class FlowRunner {
   async runTask(taskName: string, options?: Record<string, unknown>): Promise<TaskResult>;
   async describeTask(taskName: string): Promise<TaskDescription>;
   describeFlow(flowName: string): FlowDescription;
+  async expandTask(taskName: string, options?: Record<string, unknown>): Promise<ChildPlanEntry[] | null>;
   async preflight(
     flowName: string,
     params?: Record<string, unknown>,
@@ -575,6 +616,7 @@ interface FlowRunOptions {
   optionsScope?: 'flat' | 'step';   // how `params` are addressed; see configuration.md
   rollback_on_failure?: boolean;
   expandNestedFlows?: boolean;      // plan mode: expand nested flows into child rows
+  expandComposites?: boolean;       // plan mode: list composite children from static expand()
 }
 ```
 
@@ -612,6 +654,7 @@ interface FlowStepResult {
   ignoredFailure?: boolean;
   checks?: CheckOutcome[];       // checks that fired for this step (and inside its flow)
   nestedSteps?: FlowStepResult[]; // for a `flow` step: the child's own steps
+  path?: string;                 // for a composite child step: e.g. '2/1'
 }
 ```
 
@@ -639,6 +682,7 @@ interface PlanStep {
   depth?: number;
   deprecated?: boolean | string;   // plan mode: the target is deprecated
   replaced_by?: string;
+  composite?: 'expanded' | 'opaque'; // plan mode with expandComposites
 }
 ```
 
