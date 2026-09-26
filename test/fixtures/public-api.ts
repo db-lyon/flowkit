@@ -48,6 +48,15 @@ import type {
   TaskContextInput as TaskTaskContextInput,
 } from '@db-lyon/flowkit/task';
 import { BaseTask as RootBaseTask } from '@db-lyon/flowkit';
+import {
+  FlowStepObjectSchema as RootFlowStepObjectSchema,
+  FlowStepsSchema as RootFlowStepsSchema,
+  refineFlowStep as rootRefineFlowStep,
+} from '@db-lyon/flowkit';
+import {
+  FlowStepObjectSchema as ConfigFlowStepObjectSchema,
+  refineFlowStep as configRefineFlowStep,
+} from '@db-lyon/flowkit/config';
 
 const signal = new AbortController().signal;
 const rootOptions: RootShellTaskOptions = { command: 'echo root', signal };
@@ -218,3 +227,86 @@ void invalidNestedAgentTask;
 void rootRunnerWithNestedFactory;
 void flowRunnerWithNestedFactory;
 void invalidPhase;
+
+// A host reuses the step schema for its own manifests.
+const hostStepSchema = rootRefineFlowStep(RootFlowStepObjectSchema.extend({}));
+const configStepSchema = configRefineFlowStep(ConfigFlowStepObjectSchema);
+const hostStep: { task?: string; when?: string | boolean } = hostStepSchema.parse({ task: 'a' });
+void hostStep;
+void configStepSchema;
+void RootFlowStepsSchema;
+
+// Task and flow primitives: option schemas, describe, deprecation, checks,
+// preflight, scoped options, composites, strict config.
+import {
+  FlowRunner as RootFlowRunner,
+  CheckFailedError as RootCheckFailedError,
+  TaskOptionsError as RootTaskOptionsError,
+  UnknownConfigKeyError as RootUnknownConfigKeyError,
+  StepCheckSchema as RootStepCheckSchema,
+  OptionSpecsSchema as RootOptionSpecsSchema,
+  findUnknownKeys as rootFindUnknownKeys,
+  collectRollbackRecords as rootCollectRollbackRecords,
+  validateTaskOptions as rootValidateTaskOptions,
+  type OptionSpecs as RootOptionSpecs,
+  type TaskDescription as RootTaskDescription,
+  type FlowDescription as RootFlowDescription,
+  type PreflightResult as RootPreflightResult,
+  type StepReferenceIssue as RootStepReferenceIssue,
+  type RunWarning as RootRunWarning,
+  type ChildPlanEntry as RootChildPlanEntry,
+  type ExpandContext as RootExpandContext,
+  type OptionsScope as RootOptionsScope,
+  type ConditionContext as RootConditionContext,
+} from '@db-lyon/flowkit';
+import { CheckFailedError as FlowCheckFailedError, type PreflightResult as FlowPreflightResult } from '@db-lyon/flowkit/flow';
+import { TaskOptionsError as TaskTaskOptionsError, collectRollbackRecords as taskCollectRollbackRecords } from '@db-lyon/flowkit/task';
+import { findUnknownKeys as configFindUnknownKeys, StepCheckSchema as ConfigStepCheckSchema } from '@db-lyon/flowkit/config';
+
+class PublicComposite extends RootBaseTask<{ ids: string[] }> {
+  static optionsSchema: RootOptionSpecs = { ids: { type: 'array', items: { type: 'string' }, required: true } };
+  static deprecated = 'use something else';
+  static replacedBy = 'other';
+  static expand(options: Record<string, unknown>, ctx: RootExpandContext): RootChildPlanEntry[] | null {
+    void ctx.taskName;
+    return Array.isArray(options.ids) ? options.ids.map((id) => ({ task: 'item', options: { id } })) : null;
+  }
+  get taskName(): string {
+    return 'public-composite';
+  }
+  async execute(): Promise<RootTaskResult> {
+    const child: RootTaskResult = await this.step('item', { id: 'a' }, { retries: 1 });
+    const flowChild: RootTaskResult = await this.step({ flow: 'f' });
+    return { success: child.success && flowChild.success, children: child.children };
+  }
+}
+
+async function publicPrimitives(runner: InstanceType<typeof RootFlowRunner>): Promise<void> {
+  const scope: RootOptionsScope = 'step';
+  await runner.run({ flowName: 'f', optionsScope: scope, params: { item: { id: 'x' } }, expandComposites: true });
+  const d: RootTaskDescription = await runner.describeTask('item');
+  const fd: RootFlowDescription = runner.describeFlow('f');
+  const pf: RootPreflightResult = await runner.preflight('f', {}, { skip: ['1'] });
+  const pf2: FlowPreflightResult = pf;
+  const issues: RootStepReferenceIssue[] = runner.checkStepReferences('f');
+  const plan: RootChildPlanEntry[] | null = await runner.expandTask('item', {});
+  const warnings: RootRunWarning[] | undefined = (await runner.runTask('item')).warnings;
+  void [d, fd, pf2, issues, plan, warnings];
+}
+
+const evaluatorCtx = (ctx: RootConditionContext) => [ctx.references, ctx.check?.action, ctx.step?.name, ctx.flowName];
+const checkErrors: Error[] = [RootCheckFailedError.prototype, FlowCheckFailedError.prototype];
+const optionErrors: Error[] = [RootTaskOptionsError.prototype, TaskTaskOptionsError.prototype, RootUnknownConfigKeyError.prototype];
+const strictKeys = rootFindUnknownKeys(RootStepCheckSchema, {}, { passthroughKeys: ['x'] });
+const strictKeys2 = configFindUnknownKeys(ConfigStepCheckSchema, {});
+const optionIssues = rootValidateTaskOptions(RootOptionSpecsSchema.parse({}), {});
+const records = [rootCollectRollbackRecords, taskCollectRollbackRecords];
+void PublicComposite;
+void publicPrimitives;
+void evaluatorCtx;
+void checkErrors;
+void optionErrors;
+void strictKeys;
+void strictKeys2;
+void optionIssues;
+void records;

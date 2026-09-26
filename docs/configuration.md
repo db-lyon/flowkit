@@ -33,6 +33,10 @@ tasks:
 | `description` | `string` | no | Human-readable description |
 | `group` | `string` | no | Logical grouping label |
 | `options` | `object` | no | Default options (merged with step-level overrides) |
+| `options_schema` | `object` | no | Declared options, refining the class's `optionsSchema`. See [Declaring options](custom-tasks.md#declaring-options) |
+| `outputs` | `object` | no | Declared `data` outputs (`type`, `description`), for `describe`. Not enforced |
+| `deprecated` | `boolean \| string` | no | Mark the task deprecated. See [Deprecation](#deprecation) |
+| `replaced_by` | `string` | no | The task to use instead, named in the deprecation warning |
 
 ### Flow definition
 
@@ -49,22 +53,32 @@ flows:
         flow: other_flow            # reference another flow (nesting)
       3:
         task: None                  # skip sentinel — step is always skipped
+      4:
+        flow: None                  # same, for a step that referenced a flow
 ```
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `description` | `string` | yes | Human-readable flow description |
 | `steps` | `object` | yes | Steps keyed by number (execution order) |
+| `checks` | `array` | no | Flow-level preflight checks. See [Preflight checks](#preflight-checks) |
+| `options_scope` | `'flat' \| 'step'` | no | How runtime `params` reach steps. See [Step-scoped runtime options](#step-scoped-runtime-options) |
+| `deprecated` | `boolean \| string` | no | Mark the flow deprecated. See [Deprecation](#deprecation) |
+| `replaced_by` | `string` | no | The flow to use instead, named in the deprecation warning |
 
 ### Flow step
 
-Each step must have exactly one of `task` or `flow` (mutually exclusive), unless `task: None` is used to mark a skipped step.
+Each step must have exactly one of `task` or `flow` (mutually exclusive), unless `task: None` or `flow: None` is used to mark a skipped step. `None` in either slot wins, so an overlay can switch off an inherited step by number whichever key the base used.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `task` | `string` | one of task/flow | Task name to execute |
 | `flow` | `string` | one of task/flow | Nested flow name to execute |
 | `options` | `object` | no | Override options for this step |
+| `when` | `string \| boolean` | no | Run the step only when truthy |
+| `ignore_failure` | `boolean` | no | Record a failure and continue |
+| `retries` / `retryDelay` / `retryOn` | | no | See [Per-step retry](#per-step-retry) |
+| `checks` | `array` | no | Preflight checks. See [Preflight checks](#preflight-checks) |
 
 Step numbers are sorted numerically at execution time, so `1, 2, 10` runs in that order (not lexicographic `1, 10, 2`).
 
@@ -93,6 +107,56 @@ flows:
 
 Runtime parameters passed to `FlowRunner.run({ params })` merge on top with the highest priority (**task defaults < step overrides < runtime params**).
 
+### Step-scoped runtime options
+
+By default runtime `params` are **flat**: every key is merged into every step's
+options, so `params: { environment: 'prod' }` reaches the build, the test and
+the deploy alike. Opt in to the **step** scope to address each step instead:
+
+```yaml
+flows:
+  release:
+    options_scope: step          # or FlowRunnerConfig.optionsScope / run({ optionsScope })
+    steps:
+      1: { task: build }
+      2: { flow: ci }            # ci: 1: lint, 2: test
+      3: { task: deploy }
+```
+
+```typescript
+await runner.run({
+  flowName: 'release',
+  params: {
+    deploy: { environment: 'prod' },   // every step running the `deploy` task
+    '2/2': { coverage: 90 },           // step 2 of the flow run by step 2 (ci's `test`)
+    '1': { target: 'release' },        // main step 1
+  },
+});
+```
+
+Under the step scope each `params` key is a **selector** and its value an
+options object:
+
+| Selector | Matches |
+|----------|---------|
+| a task name, e.g. `deploy` or `asset.list` (dots are part of the name) | every step running that task, anywhere in the run: main steps, nested flows and hook steps |
+| a step path, e.g. `3` or `2/1` | one main step; `/` descends into the flow a step runs, as in an expanded plan's `path` |
+
+- A path is more specific than a name: when both address a step, the path's
+  value wins on a shared key.
+- The scoped value takes the runtime slot in the precedence order, so it
+  still overrides task defaults, enclosing-flow overrides and step options.
+- A selector that matches no task name or step path, or a value that is not an
+  object, fails the run (and a plan) before anything starts, naming each bad key.
+- Hook steps are addressed by task name only.
+- The scope is fixed by the flow the run starts on. Nested flows follow it and
+  their own `options_scope` is ignored.
+- `when:` expressions and `conditionEvaluator` still receive `params` as passed.
+
+Resolution order for the scope: `run({ optionsScope })`, then the flow's
+`options_scope`, then `FlowRunnerConfig.optionsScope`, then `flat`. Nothing
+changes unless one of them says `step`.
+
 ### Step references
 
 Option values may reference the output of earlier steps in the same flow using `${steps.<id>.<path>}`:
@@ -120,6 +184,43 @@ flows:
 - References that can't be resolved throw and fail the step.
 
 References resolve just before the step runs, against the results of already-completed steps in the current flow. Nested flows have their own reference scope — they don't see their parent flow's steps.
+
+#### Binding by identity, and the uniqueness rule
+
+A reference names a step by **identity**, its number or its task name, never by
+position relative to the referencing step. That is why step numbers are worth
+keeping stable (and gapped: `10`, `20`, `30`): an overlay that inserts step `15`
+changes no reference.
+
+- A number binds to exactly one step. Prefer it whenever a task runs more than
+  once in a flow.
+- A name binds to the step running that task. When several main steps run the
+  same task, the runtime rule is the one above: the most recently completed
+  one wins. That is well defined but fragile, because which one is "most
+  recent" depends on where the referencing step sits.
+- The same resolution applies in `when:` and in check `when`s. Hook steps see
+  every main step that ran. A flow step's `options` are overrides for the
+  tasks inside the nested flow, and references in them resolve against the
+  nested flow's steps.
+
+Set `strictStepReferences: true` on the `FlowRunner` to make the uniqueness
+rule an error instead: a run or plan refuses to start, naming each reference,
+when a `${steps.<id>}` in a step's options, `when` or checks is **ambiguous** (a
+name used by more than one main step), **unknown** (no such number or name) or
+**forward** (the step has not run yet at that point). The check covers the flow
+a run starts on and every flow nested under it. It is opt-in because a config
+that relies on "most recent wins" would otherwise stop running.
+`runner.checkStepReferences(flowName)` returns the same findings without
+enforcing them, for a linter or a `describe` command:
+
+```typescript
+runner.checkStepReferences('release');
+// [{ flowName: 'release', stepNumber: 3, reference: '${steps.deploy.url}', kind: 'ambiguous',
+//    message: '${steps.deploy.url}: "deploy" is the name of steps 1, 2; reference one by number' }]
+```
+
+Task definition defaults are not scanned: they resolve in whichever step runs
+the task.
 
 ### Flow-level hooks
 
@@ -227,6 +328,108 @@ steps:
 
 Returns `{ text, parsed?, usage? }`. Provider failures become step failures; missing provider is a clear error.
 
+### Preflight checks
+
+A flow or a step can declare `checks`: conditions that gate it, evaluated by the
+same `conditionEvaluator` as `when:` (or the built-in `${...}` truthiness
+fallback). A check **fires** when its `when` is truthy, and its `action` applies:
+
+| `action` | At run time |
+|----------|-------------|
+| `error` | The step fails with a `CheckFailedError` carrying `message`, before it starts. The flow aborts whatever `ignore_failure` says: a gate is not a failure to tolerate. |
+| `skip` | The step is skipped (`skipReason: 'check'`). |
+| `warn` | A `check` warning is added to `FlowRunResult.warnings` and the step runs. |
+
+```yaml
+flows:
+  import_assets:
+    checks:                                    # gate the whole flow
+      - when: "not editor.connected"
+        action: error
+        message: No editor is connected.
+    steps:
+      1:
+        task: import
+        checks:
+          - when: "editor.has_modal_dialog"
+            action: error
+            message: A modal dialog is open in the editor.
+          - when: "not project.python_enabled"
+            action: skip
+      2:
+        task: validate
+        checks:
+          - { when: "${project.dirty}", action: warn, message: Unsaved changes. }
+```
+
+- Step checks run in order, just before the step would run and after `when:`
+  has let it. Error beats skip beats warn.
+- Flow checks run before anything in the flow, `on_start` included. An `error`
+  fails the flow with no steps; a `skip` returns success with every main step
+  skipped (`skipReason: 'check'`). For a nested flow the verdict becomes the
+  flow step's.
+- Checks on hook steps are enforced too; a fired `error` is reported in
+  `hookErrors`.
+- A check whose expression throws (for example one that reads a step result
+  that does not exist) fails the step the way a throwing `when:` does, and
+  `ignore_failure` applies.
+- The evaluator's `ConditionContext` carries `check`, `step`, `flowName` and
+  `references` (the runner's host namespaces) alongside the usual `steps`,
+  `params`, `context` and `error`, so a check can be written against host state.
+- Fired checks are listed on the step (`FlowStepResult.checks`) and for the
+  whole run, nested flows included (`FlowRunResult.checks`).
+
+`FlowRunner.preflight(flowName, params?, { skip? })` evaluates every check in a
+flow without running anything and reports what would happen to each step:
+
+```typescript
+const pf = await runner.preflight('import_assets', { path: '/Game/X' });
+pf.ok;     // false when any `error` check fired
+pf.checks; // the flow's own checks, evaluated
+pf.steps;  // [{ path: '1', status: 'error', checks: [...] }, { path: '2', status: 'run', ... }]
+```
+
+Each row has a `status` of `run`, `skip` (statically, or a `skip` check fired),
+`error` or `unknown`. Nothing has run at preflight, so checks see no step
+results; one that reads a step result cannot be evaluated, its outcome carries
+the `error`, and the row is `unknown` rather than guessed. Nested flows are
+expanded with the same paths as an expanded plan, and hook steps are listed as
+`<phase>/<n>`. Plan mode (`run({ plan: true })`) lists each step's declared
+`checks` unevaluated.
+
+### Deprecation
+
+Tasks and flows can be retired without breaking the configs that still use
+them. A deprecated task or flow still runs; the run and the plan say so:
+
+```yaml
+tasks:
+  deploy_legacy:
+    class_path: tasks.Deploy
+    deprecated: "Targets the old cluster."   # or just `true`
+    replaced_by: deploy
+
+flows:
+  release_v1:
+    deprecated: true
+    replaced_by: release
+    steps:
+      1: { task: deploy_legacy }
+```
+
+- A run collects a structured warning for every deprecated task or flow it
+  ran, on the step's `result.warnings` and, without repeats, on
+  `FlowRunResult.warnings`:
+  `{ code: 'deprecated', kind: 'task', name: 'deploy_legacy', replacedBy: 'deploy', message: 'Task "deploy_legacy" is deprecated: Targets the old cluster. Use "deploy" instead.' }`.
+  `runTask` puts it on the returned `TaskResult.warnings`. The runner's logger
+  gets it at `warn` too.
+- Plan mode marks each deprecated row with `deprecated` and `replaced_by` and
+  returns the same warnings on the plan's `warnings`. Skipped steps are not
+  reported.
+- A task class can declare `static deprecated` and `static replacedBy`; a
+  definition's `deprecated` (including `false`) overrides the class.
+- `FlowRunner.describeTask(name)` and `describeFlow(name)` expose both fields.
+
 ## Config layering
 
 `loadConfig()` merges up to four layers, left to right:
@@ -315,6 +518,46 @@ Result: `['eslint', 'prettier', 'my-custom-plugin']`
 
 The `__merge` annotation is stripped from the final array.
 
+## Strict validation
+
+Zod drops keys a schema does not declare, so a typo such as `retires: 3` or
+`ignore_failur: true` loads cleanly and then does nothing. Pass `strict` to
+make the loader reject them instead:
+
+```typescript
+const { config } = loadConfig({
+  filename: 'pipeline.yml',
+  schema: EngineConfigSchema,
+  strict: true,
+});
+// UnknownConfigKeyError: Unknown config key:
+//   flows.ci.steps.2.retires (did you mean "retries"?)
+```
+
+The check runs on the merged layers, before the schema parses them, and walks
+the schema you pass: tasks, flows, steps, hook steps, agents, agent tools and
+budgets, plus any section a host adds with `EngineConfigSchema.extend(...)`.
+Free-form maps (`options`, an agent's `schema`, a tool's `parameters`) are not
+checked, and neither is any object schema declared `.passthrough()` or with a
+`.catchall()`.
+
+A host that keeps sections in the same file but does not declare them in the
+schema it passes lists them as `passthroughKeys`. Only top-level keys can be
+exempted this way:
+
+```typescript
+loadConfig({
+  filename: 'ue-mcp.yml',
+  schema: HostConfigSchema,
+  strict: { passthroughKeys: ['bridge', 'editor'] },
+});
+```
+
+Strict validation is opt-in. Without `strict`, unknown keys are dropped
+exactly as before. `findUnknownKeys(schema, value)` and
+`assertKnownKeys(schema, value)` run the same check on config that does not
+come through `loadConfig`.
+
 ## Finding config files
 
 `findConfigFile()` walks up parent directories to locate a file:
@@ -360,4 +603,22 @@ const { config } = loadConfig({
 });
 
 // config.tasks, config.flows, config.database, config.features
+```
+
+### Reusing the step and flow schemas
+
+A host that declares flows outside the main config file (a plugin manifest, a
+flow built in code) should validate them with flowkit's own schemas rather than
+a copy, so every step field (`when`, `ignore_failure`, `retries`, `None` skips,
+and whatever is added later) keeps working there too.
+
+```typescript
+import { FlowDefinitionSchema, FlowStepObjectSchema, refineFlowStep } from '@db-lyon/flowkit';
+
+// A whole flow, with a host-only field.
+const ManifestFlowSchema = FlowDefinitionSchema.extend({ group: z.string().optional() });
+
+// A step with a host-only field. `FlowStepSchema` is refined and cannot be
+// extended, so extend the object form and refine it again.
+const ManifestStepSchema = refineFlowStep(FlowStepObjectSchema.extend({ label: z.string().optional() }));
 ```

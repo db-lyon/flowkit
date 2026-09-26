@@ -2,10 +2,18 @@ import type { Logger } from '../logger.js';
 import { noopLogger } from '../logger.js';
 import type { TaskRegistry } from './registry.js';
 import type { LLMProvider, LLMToolHandler } from './llm-provider.js';
-import type { TaskDefinition } from '../config/schema.js';
+import type { TaskDefinition, OptionSpecs, OutputSpecs } from '../config/schema.js';
 import type { TokenLedger } from './token-ledger.js';
 import type { ReferenceContext } from '../references.js';
 import { resolveTaskCall } from './task-resolution.js';
+import type { RunWarning } from './warnings.js';
+import type { FlowStepResult } from '../flow/runner.js';
+import type {
+  ChildStepRunner,
+  ChildStepSpec,
+  ChildStepTarget,
+  ExpandFunction,
+} from './composite.js';
 
 /**
  * Ambient state handed to a task at construction.
@@ -62,6 +70,15 @@ export interface TaskContext {
     depth: number,
     ledger?: TokenLedger,
   ) => Promise<TaskResult>;
+  /**
+   * Run one child task or flow through the runner, as a composite task does:
+   * the child is recorded under this task's result (`TaskResult.children`),
+   * gets the step's retry, option-schema, deprecation and hook treatment, and
+   * its rollback record is harvested with the parent's. Wired by `FlowRunner`
+   * for every task it runs; absent when a task is constructed directly. Tasks
+   * normally call it through `BaseTask.step`.
+   */
+  step?: ChildStepRunner;
   /** Current agent-recursion depth, threaded by `FlowRunner.runAgent`. */
   __agentDepth?: number;
   /**
@@ -149,9 +166,40 @@ export interface TaskResult {
   error?: Error;
   duration?: number;
   rollback?: RollbackRecord;
+  /**
+   * Non-fatal notices added by the runner, e.g. that the task is deprecated.
+   * A task may add its own; the runner appends rather than replaces.
+   */
+  warnings?: RunWarning[];
+  /**
+   * Child steps a composite ran through `ctx.step`, in order. Set by the
+   * runner; a task does not fill it itself.
+   */
+  children?: FlowStepResult[];
 }
 
 export abstract class BaseTask<TOpts = Record<string, unknown>> {
+  /**
+   * Declared options, checked by `FlowRunner` before the task runs. A task
+   * definition's `options_schema` refines it per option. Optional: a class
+   * that declares nothing is not checked.
+   */
+  declare static optionsSchema?: OptionSpecs;
+  /** Declared `data` outputs, for `describe` and docs. Not enforced. */
+  declare static outputs?: OutputSpecs;
+  /** Fallback description when the task definition has none. */
+  declare static description?: string;
+  /** Mark every use of the class deprecated. A definition's `deprecated` overrides it. */
+  declare static deprecated?: boolean | string;
+  /** The replacement named in the deprecation warning. */
+  declare static replacedBy?: string;
+  /**
+   * For a composite: the children it would run for given options, without
+   * running anything, for plans and describe. Return `null` when they depend on
+   * runtime results. See `ExpandFunction`.
+   */
+  declare static expand?: ExpandFunction;
+
   protected logger: Logger;
   /**
    * Typed `TaskContext`, not `ResolvedTaskContext`, so a subclass can narrow it
@@ -234,6 +282,32 @@ export abstract class BaseTask<TOpts = Record<string, unknown>> {
   ): Promise<TaskResult> {
     const task = await this.resolve(taskName, options);
     return task.run();
+  }
+
+  /**
+   * Run one child task (by configured name) or flow (`{ flow: name }`) through
+   * the runner and return its result; see `TaskContext.step`. Never throws for
+   * a failed child. Outside a runner there is no bookkeeping to do, so a task
+   * child falls back to `call()` and a flow child fails.
+   */
+  protected async step(
+    target: ChildStepTarget,
+    options?: Record<string, unknown>,
+    spec?: ChildStepSpec,
+  ): Promise<TaskResult> {
+    if (this.ctx.step) return this.ctx.step(target, options, spec);
+    if (typeof target === 'object' && 'flow' in target) {
+      return {
+        success: false,
+        error: new Error(`Cannot run flow "${target.flow}" as a child step outside a FlowRunner`),
+      };
+    }
+    const name = typeof target === 'string' ? target : target.task;
+    try {
+      return await this.call(name, options);
+    } catch (err) {
+      return { success: false, error: err instanceof Error ? err : new Error(String(err)) };
+    }
   }
 
   /**

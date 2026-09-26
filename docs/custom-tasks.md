@@ -55,6 +55,81 @@ export default class FetchData extends BaseTask<MyOptions> {
 | Member | Description |
 |--------|-------------|
 | `validate()` | Called before `execute()`. Throw to abort with a validation error. |
+| `static optionsSchema` | Declared options, checked before the task runs. See below. |
+| `static outputs` | Declared `data` keys, for `describe` and docs. Not enforced. |
+| `static description` | Used when the task definition has no `description`. |
+
+### Declaring options
+
+A task class can declare its options statically, the way a CumulusCI task
+declares `task_options`. `FlowRunner` checks a step's final options against the
+declaration before it constructs the task, so a bad option fails with a message
+naming the task and the option, and the task never runs:
+
+```typescript
+import { BaseTask, type OptionSpecs, type TaskResult } from '@db-lyon/flowkit';
+
+export default class Deploy extends BaseTask<{ environment: string; replicas: number }> {
+  static description = 'Deploy the build';
+  static optionsSchema: OptionSpecs = {
+    environment: { type: 'string', enum: ['staging', 'prod'], required: true, description: 'Target' },
+    replicas: { type: 'integer', minimum: 1, maximum: 5, default: 2 },
+  };
+  static outputs = { url: { type: 'string', description: 'Where it landed' } };
+
+  get taskName() { return 'deploy'; }
+  async execute(): Promise<TaskResult> { /* ... */ return { success: true }; }
+}
+// Task "deploy": option "environment" must be one of ["staging","prod"]
+```
+
+Each option spec takes `type` (one type or a list), `description`,
+`required`, `default`, and the JSON Schema constraint keywords `enum`, `const`,
+`minimum`, `maximum`, `exclusiveMinimum`, `exclusiveMaximum`, `minLength`,
+`maxLength`, `pattern`, `minItems`, `maxItems`, `items`, `properties`,
+`additionalProperties` and `nullable`.
+
+- `default` fills an option no layer supplied. It is the lowest precedence of
+  all, below the task definition's `options`.
+- `required` is checked after every layer (defaults, definition options, step
+  options, runtime params) has been merged.
+- Options the schema does not declare are allowed through.
+- A failed check is not retried, whatever the step's `retries`.
+
+A task definition refines the class declaration with `options_schema`, option
+by option and field by field, so one configured variant can narrow an enum,
+change a default or add an option without restating the rest:
+
+```yaml
+tasks:
+  deploy_staging:
+    class_path: tasks.Deploy
+    options_schema:
+      environment: { enum: [staging], default: staging }
+```
+
+The check runs on every `FlowRunner` path: flow steps, hook steps, `runTask`,
+rollback and composite child steps. A task built directly (`new Deploy(...)`)
+or through `this.call()` from another task is not checked.
+`validateTaskOptions(specs, options)` and `assertTaskOptions(name, specs,
+options)` run the same check for a host that constructs tasks itself.
+
+### Describing a task
+
+`registry.describe(name, taskDefinitions?)` folds a task's class metadata and
+its configured definition into one object, for a host's `describe` command or
+generated docs. `FlowRunner.describeTask(name)` does the same with the
+runner's own definitions:
+
+```typescript
+const d = await runner.describeTask('deploy');
+// {
+//   name: 'deploy', class_path: 'tasks.Deploy', description: 'Deploy the build',
+//   options: { replicas: 2 },               // schema defaults, then definition options
+//   options_schema: { environment: {...}, replicas: {...} },
+//   outputs: { url: {...} },
+// }
+```
 
 ### Available on `this`
 
@@ -86,6 +161,86 @@ const result = await this.call('soql_query', { query: 'SELECT Id FROM Case' });
 The `${ns.path}` references in those configured defaults are interpolated for you, against the same scope the calling task itself runs under. The `options` you pass are your own runtime data and are **never** interpolated, so a `${...}` you computed reaches the task verbatim rather than being reinterpreted as configuration.
 
 Calling a task requires a registry on the context, which `FlowRunner` supplies. A task constructed by hand without one throws.
+
+## Composite tasks
+
+A flow is a fixed sequence. When the children depend on the input (one child
+per item in a list, or pages until a cap), write a **composite**: a task that
+runs each child with `this.step()`. Unlike `this.call()`, a child step goes
+through the runner's bookkeeping, exactly like a flow step:
+
+- it is recorded under the parent, as `TaskResult.children` (a
+  `FlowStepResult[]` whose entries carry a `path` such as `2/1`), and is
+  therefore visible in the run result tree;
+- the runner's `beforeStep` / `afterStep` hooks fire for it, with that path;
+- the step retry policy applies (`{ retries, retryDelay, retryOn }` as the third
+  argument), as do option schemas and deprecation warnings;
+- its rollback record is harvested with the parent's: inside a flow with
+  `rollback_on_failure`, children unwind in reverse after the parent's own
+  record.
+
+```typescript
+class ImportBatch extends BaseTask<{ files: string[]; failFast?: boolean }> {
+  get taskName() { return 'import_batch'; }
+
+  async execute(): Promise<TaskResult> {
+    const results = [];
+    for (const file of this.options.files) {
+      const r = await this.step('asset.import', { file }, { retries: 2 });
+      results.push({ file, ok: r.success });
+      if (!r.success && this.options.failFast) {
+        return { success: false, error: r.error, data: { results, stoppedAt: file } };
+      }
+    }
+    return { success: true, data: { results } };
+  }
+}
+```
+
+`this.step(target, options?, spec?)` takes a configured task name, `{ task:
+name }` or `{ flow: name }`, and returns the child's `TaskResult`. It never
+throws for a failed child: the composite decides whether to go on. The
+`options` are the composite's runtime data. They are layered over the child
+task's configured defaults verbatim, not interpolated, and runtime `params` and
+enclosing-flow overrides do not reach children. For a flow child they are the
+flow's `params`.
+
+The runner supplies this for every task it runs, whether as a flow step, a hook,
+or on its own through `runner.runTask(name, options)`, so a composite behaves
+the same with or without an enclosing flow. Under `runTask`, the children are on
+the returned `TaskResult.children`, and `collectRollbackRecords(result)` returns
+every record in the tree (children first, invoke in reverse) for a host that
+does its own rollback. A task constructed by hand has no runner: a task child
+falls back to `this.call()` without bookkeeping, and a flow child fails.
+
+### `expand`: the child plan without running it
+
+A composite can declare a static `expand(options, ctx)` that returns the
+children it would run, as `{ task | flow, options? }` entries, without running
+anything. Return `null` when the children depend on runtime results (a pager
+cannot know how many pages there are):
+
+```typescript
+class ImportBatch extends BaseTask<{ files: string[] }> {
+  static expand(options: Record<string, unknown>): ChildPlanEntry[] | null {
+    const files = options.files;
+    return Array.isArray(files) ? files.map((file) => ({ task: 'asset.import', options: { file } })) : null;
+  }
+  // ...
+}
+```
+
+- `run({ plan: true, expandComposites: true })` follows each composite row with
+  its children, one level deeper and with paths (`1/1`, `1/2`), and marks the
+  row `composite: 'expanded'`. A composite whose `expand` returns `null` (or
+  throws) is marked `composite: 'opaque'`. Without `expandComposites` the plan is
+  unchanged. It composes with `expandNestedFlows`.
+- `runner.expandTask(name, options?)` returns the child plan for a `describe`
+  command, or `null`.
+- `expand` receives the options as far as they can be resolved before a run:
+  configured defaults, the step's options and its runtime params, with host
+  references interpolated and step references left as written. `ctx` carries
+  `taskName`, `taskDefinitions`, `flows` and `references`.
 
 ## The task lifecycle
 

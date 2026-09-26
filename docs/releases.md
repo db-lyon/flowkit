@@ -1,5 +1,52 @@
 # Release notes
 
+## Unreleased
+
+Task and flow primitives for hosts that model every action as a task, a flow
+or a composite. Everything here is additive or opt-in: a config and a host
+that use none of it run exactly as before.
+
+- **`flow: None`** skips a step the way `task: None` does, so an overlay can
+  switch off an inherited step whichever key the base used.
+- **Shared step schema.** `FlowStepObjectSchema` (unrefined, extendable),
+  `refineFlowStep(schema)` and `FlowStepsSchema` let a host validate its own
+  manifests with the runner's step fields instead of a copy.
+- **Strict config (opt-in).** `loadConfig({ strict: true })` fails on keys the
+  schema does not declare, naming each by path with a did-you-mean;
+  `{ passthroughKeys }` exempts host top-level sections.
+  `findUnknownKeys` / `assertKnownKeys` / `UnknownConfigKeyError` run the same
+  check elsewhere.
+- **Option schemas.** Task classes declare `static optionsSchema` and
+  `static outputs`; a definition refines them with `options_schema` and
+  `outputs`. `FlowRunner` fills schema defaults and validates before
+  constructing the task, on every runner path, with a `TaskOptionsError` naming
+  the task and option (never retried). `registry.describe(name, defs)` and
+  `runner.describeTask(name)` fold class metadata with the definition.
+- **Deprecation.** `deprecated` / `replaced_by` on task and flow definitions,
+  `static deprecated` / `static replacedBy` on classes. Running or planning one
+  adds a structured `RunWarning` to the step, `TaskResult.warnings` and
+  `FlowRunResult.warnings`; `describeTask` and the new `describeFlow` expose it.
+- **Step-scoped runtime options (opt-in).** `options_scope: step` (flow),
+  `FlowRunnerConfig.optionsScope` or `run({ optionsScope })` make each `params`
+  key a selector (task name, or step path such as `2/1`) addressing only the
+  matching steps. Unknown selectors fail before anything runs. Default `flat`.
+- **Preflight checks.** Flows and steps declare
+  `checks: [{ when, action: error | warn | skip, message }]`, evaluated by the
+  `conditionEvaluator`, whose `ConditionContext` now also carries `references`,
+  `step`, `check` and `flowName`. The runner enforces them;
+  `runner.preflight(flowName, params)` reports every step's outcome without
+  running anything.
+- **Composites.** `ctx.step(target, options, spec)` / `BaseTask.step` run a
+  child task or flow through the runner: recorded on `TaskResult.children`,
+  step hooks, retries, option checks, deprecation and rollback capture, under a
+  flow or a bare `runTask`. An optional static `expand(options, ctx)` lists the
+  children for `run({ plan: true, expandComposites: true })` and
+  `runner.expandTask(name)`. `collectRollbackRecords(result)` walks the tree.
+- **Step references.** The identity rule and the most-recent-wins tie-break
+  are documented. `runner.checkStepReferences(flowName)` reports ambiguous,
+  unknown and forward `${steps.x}` references; `strictStepReferences: true`
+  refuses to run or plan such a flow (opt-in).
+
 ## 0.17.0
 
 `AgentTaskOptions` and `AgentPromptOptions` now accept an optional programmatic

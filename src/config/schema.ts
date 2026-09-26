@@ -2,6 +2,60 @@ import { z } from 'zod';
 
 export const TaskOptionsSchema = z.record(z.unknown());
 
+/** `deprecated:` on a task or flow: `true`, or a string saying why. */
+const DeprecatedSchema = z.union([z.boolean(), z.string()]);
+
+const OptionTypeSchema = z.enum(['string', 'number', 'integer', 'boolean', 'object', 'array', 'null']);
+
+/**
+ * One declared task option. JSON-Schema-like: the constraint keywords are the
+ * JSON Schema ones (`enum`, `minimum`, `maxLength`, `items`, ...) and are
+ * checked with flowkit's built-in validator; `required` and `default` are
+ * per-option here rather than on a parent object.
+ */
+export const OptionSpecSchema = z.object({
+  type: z.union([OptionTypeSchema, z.array(OptionTypeSchema)]).optional(),
+  description: z.string().optional(),
+  /** The option must be present (after defaults and every override layer). */
+  required: z.boolean().optional(),
+  /** Used when no layer supplies the option. Lowest precedence of all. */
+  default: z.unknown().optional(),
+  enum: z.array(z.unknown()).optional(),
+  const: z.unknown().optional(),
+  minimum: z.number().optional(),
+  maximum: z.number().optional(),
+  exclusiveMinimum: z.number().optional(),
+  exclusiveMaximum: z.number().optional(),
+  minLength: z.number().int().nonnegative().optional(),
+  maxLength: z.number().int().nonnegative().optional(),
+  pattern: z.string().optional(),
+  minItems: z.number().int().nonnegative().optional(),
+  maxItems: z.number().int().nonnegative().optional(),
+  /** JSON Schema for array elements. */
+  items: z.record(z.unknown()).optional(),
+  /** JSON Schema properties for an object-valued option. */
+  properties: z.record(z.unknown()).optional(),
+  additionalProperties: z.union([z.boolean(), z.record(z.unknown())]).optional(),
+  nullable: z.boolean().optional(),
+});
+
+/** A task's declared options, keyed by option name. */
+export const OptionSpecsSchema = z.record(OptionSpecSchema);
+
+/**
+ * One declared output: a key the task puts on `TaskResult.data`. Descriptive
+ * only; the runner does not check outputs.
+ */
+export const OutputSpecSchema = z.object({
+  type: z.union([OptionTypeSchema, z.array(OptionTypeSchema)]).optional(),
+  description: z.string().optional(),
+  items: z.record(z.unknown()).optional(),
+  properties: z.record(z.unknown()).optional(),
+});
+
+/** A task's declared outputs, keyed by `data` key. */
+export const OutputSpecsSchema = z.record(OutputSpecSchema);
+
 export const TaskDefinitionSchema = z.object({
   /**
    * The task's implementation. Optional: an option-only entry (no class_path)
@@ -16,36 +70,96 @@ export const TaskDefinitionSchema = z.object({
   /** Declarative hints surfaced in listings; not used by the runner. */
   idempotent: z.boolean().optional(),
   reversible: z.boolean().optional(),
+  /**
+   * Declared options. Refines (per option, field by field) any static
+   * `optionsSchema` on the task class, and step options are validated against
+   * the result before the task runs.
+   */
+  options_schema: OptionSpecsSchema.optional(),
+  /** Declared outputs, for `describe` and docs. Not enforced. */
+  outputs: OutputSpecsSchema.optional(),
+  /**
+   * Mark the task deprecated: `true`, or a string saying why. Running or
+   * planning it adds a `deprecated` warning to the result; it still runs.
+   */
+  deprecated: DeprecatedSchema.optional(),
+  /** The task to use instead, named in the deprecation warning. */
+  replaced_by: z.string().optional(),
 });
 
-export const FlowStepSchema = z
-  .object({
-    task: z.string().optional(),
-    flow: z.string().optional(),
-    options: TaskOptionsSchema.optional(),
-    /** Retry the step up to N additional times on failure. */
-    retries: z.number().int().nonnegative().optional(),
-    /** Delay between retries, in milliseconds. */
-    retryDelay: z.number().int().nonnegative().optional(),
-    /** Only retry when the error message contains this substring. */
-    retryOn: z.string().optional(),
-    /**
-     * Conditional execution. A boolean runs/skips the step directly; a string is
-     * an expression evaluated at runtime by the runner's `conditionEvaluator`
-     * (or the built-in `${...}`-reference truthiness check if none is set). A
-     * falsy result skips the step without failing the flow.
-     */
-    when: z.union([z.string(), z.boolean()]).optional(),
-    /** If true, a failure of this step is recorded but does not abort the flow. */
-    ignore_failure: z.boolean().optional(),
-  })
-  .refine(
-    (data) => {
-      if (data.task === 'None') return true;
-      return (data.task && !data.flow) || (!data.task && data.flow);
-    },
-    { message: 'Step must have exactly one of task or flow (or task: None to skip)' },
-  );
+/**
+ * A declared preflight check. `when` is evaluated by the runner's
+ * `conditionEvaluator` (or the built-in `${...}` truthiness fallback); when it
+ * is truthy the check fires and `action` applies: `error` fails before the
+ * step (or flow) starts, `skip` skips it, `warn` records a warning and runs it.
+ */
+export const StepCheckSchema = z.object({
+  when: z.union([z.string(), z.boolean()]),
+  action: z.enum(['error', 'warn', 'skip']),
+  /** Shown in the error, skip reason or warning. Defaults to one naming the condition. */
+  message: z.string().optional(),
+});
+
+/**
+ * The fields of one flow step, as a plain object schema.
+ *
+ * Exported unrefined so a host can `.extend()` it for its own manifests (a
+ * plugin manifest, a code-declared flow) and stay in step with every field the
+ * runner understands. Pass the extended schema through `refineFlowStep` to get
+ * the same target rule `FlowStepSchema` enforces.
+ */
+export const FlowStepObjectSchema = z.object({
+  task: z.string().optional(),
+  flow: z.string().optional(),
+  options: TaskOptionsSchema.optional(),
+  /** Retry the step up to N additional times on failure. */
+  retries: z.number().int().nonnegative().optional(),
+  /** Delay between retries, in milliseconds. */
+  retryDelay: z.number().int().nonnegative().optional(),
+  /** Only retry when the error message contains this substring. */
+  retryOn: z.string().optional(),
+  /**
+   * Conditional execution. A boolean runs/skips the step directly; a string is
+   * an expression evaluated at runtime by the runner's `conditionEvaluator`
+   * (or the built-in `${...}`-reference truthiness check if none is set). A
+   * falsy result skips the step without failing the flow.
+   */
+  when: z.union([z.string(), z.boolean()]).optional(),
+  /** If true, a failure of this step is recorded but does not abort the flow. */
+  ignore_failure: z.boolean().optional(),
+  /**
+   * Preflight checks, evaluated in order just before the step would run (after
+   * `when`), and reported without running anything by `FlowRunner.preflight`.
+   */
+  checks: z.array(StepCheckSchema).optional(),
+});
+
+/** The target rule shared by every step schema: exactly one of task or flow, or a `None` skip. */
+function hasOneStepTarget(data: { task?: string; flow?: string }): boolean {
+  // `None` in either slot disables the step. An overlay that turns a
+  // `flow:` step off with `task: None` (or the reverse) merges into a step
+  // carrying both keys, and that must still parse as a skip.
+  if (data.task === 'None' || data.flow === 'None') return true;
+  return (!!data.task && !data.flow) || (!data.task && !!data.flow);
+}
+
+/**
+ * Apply the step target rule to a step object schema, typically one a host
+ * built with `FlowStepObjectSchema.extend({ ... })`.
+ */
+export function refineFlowStep<T extends z.ZodType<{ task?: string; flow?: string }>>(
+  schema: T,
+): z.ZodEffects<T> {
+  return schema.refine(hasOneStepTarget, {
+    message: 'Step must have exactly one of task or flow (or task: None / flow: None to skip)',
+  });
+}
+
+/** One flow step: `FlowStepObjectSchema` with the target rule applied. */
+export const FlowStepSchema = refineFlowStep(FlowStepObjectSchema);
+
+/** A flow's `steps:` map, keyed by step number. */
+export const FlowStepsSchema = z.record(z.coerce.string(), FlowStepSchema);
 
 export const FlowDefinitionSchema = z.object({
   /**
@@ -54,7 +168,7 @@ export const FlowDefinitionSchema = z.object({
    */
   description: z.string().nullish(),
   /** Optional/defaulted so an override that only adjusts hooks/options is valid. */
-  steps: z.record(z.coerce.string(), FlowStepSchema).default({}),
+  steps: FlowStepsSchema.default({}),
   /** Runs before the first step. Failure fails the flow before steps execute. */
   on_start: z.array(FlowStepSchema).optional(),
   /** Runs after all steps succeed. */
@@ -65,6 +179,19 @@ export const FlowDefinitionSchema = z.object({
   finally: z.array(FlowStepSchema).optional(),
   /** If true, invoke rollback records from completed steps in reverse order on failure. */
   rollback_on_failure: z.boolean().optional(),
+  /** Preflight checks for the whole flow, evaluated before any of its steps or hooks. */
+  checks: z.array(StepCheckSchema).optional(),
+  /**
+   * How runtime `params` reach the steps of a run started on this flow.
+   * `flat` (the default): every key goes to every step. `step`: each key is a
+   * step selector (a task name or a step path such as `2` or `2/1`) whose value
+   * is the options for the matching steps only.
+   */
+  options_scope: z.enum(['flat', 'step']).optional(),
+  /** Mark the flow deprecated: `true`, or a string saying why. It still runs. */
+  deprecated: DeprecatedSchema.optional(),
+  /** The flow to use instead, named in the deprecation warning. */
+  replaced_by: z.string().optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -140,8 +267,13 @@ export const EngineConfigSchema = z.object({
 });
 
 export type TaskOptions = z.infer<typeof TaskOptionsSchema>;
+export type OptionSpec = z.infer<typeof OptionSpecSchema>;
+export type OptionSpecs = z.infer<typeof OptionSpecsSchema>;
+export type OutputSpec = z.infer<typeof OutputSpecSchema>;
+export type OutputSpecs = z.infer<typeof OutputSpecsSchema>;
 export type TaskDefinition = z.infer<typeof TaskDefinitionSchema>;
 export type FlowStep = z.infer<typeof FlowStepSchema>;
+export type StepCheck = z.infer<typeof StepCheckSchema>;
 export type FlowDefinition = z.infer<typeof FlowDefinitionSchema>;
 export type AgentTool = z.infer<typeof AgentToolSchema>;
 export type AgentBudget = z.infer<typeof AgentBudgetSchema>;

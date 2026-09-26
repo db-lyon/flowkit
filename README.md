@@ -248,6 +248,23 @@ release:
     2: { task: deploy }
 ```
 
+### Step-scoped runtime options
+
+Runtime `params` reach every step by default. Opt in with `options_scope: step`
+(on the flow, the runner, or the run) to address them per step, by task name or
+by step path:
+
+```typescript
+await runner.run({
+  flowName: 'release',
+  optionsScope: 'step',
+  params: { deploy: { environment: 'prod' }, '2/1': { coverage: 90 } },
+});
+```
+
+A selector that matches no step fails the run before anything starts. See
+[docs/configuration.md](docs/configuration.md#step-scoped-runtime-options).
+
 ### Conditional steps (`when`)
 
 A step runs only when its `when` is truthy. It accepts a boolean, or a string
@@ -269,6 +286,23 @@ new FlowRunner({
   conditionEvaluator: (expr, ctx) => evalMyDsl(expr, ctx), // ctx: { steps, params, context, error }
 });
 ```
+
+### Preflight checks
+
+Flows and steps can declare `checks` evaluated by the same condition evaluator.
+A fired check errors (before the step starts), skips, or warns:
+
+```yaml
+steps:
+  1:
+    task: import
+    checks:
+      - { when: "editor.has_modal_dialog", action: error, message: A modal dialog is open. }
+```
+
+`runner.preflight(flowName, params)` evaluates every check without running
+anything and reports each step as `run`, `skip`, `error` or `unknown`. See
+[docs/configuration.md](docs/configuration.md#preflight-checks).
 
 ### Continue on failure (`ignore_failure`)
 
@@ -296,7 +330,7 @@ Or mark a step as permanently skipped in YAML:
 ```yaml
 steps:
   3:
-    task: None
+    task: None   # or `flow: None` for a step that ran a flow
 ```
 
 ### Plan mode
@@ -315,6 +349,24 @@ their child steps, each annotated with a hierarchical `path` (e.g. `2/1`):
 
 ```typescript
 await runner.run({ flowName: 'release', plan: true, expandNestedFlows: true });
+```
+
+### Composite tasks
+
+A task whose children depend on its input runs each child with `this.step()`.
+Children go through the runner like flow steps (recorded under the parent,
+retried, validated, rolled back), under a flow or on their own via `runTask`.
+An optional static `expand()` lists the children for plans without running
+them. See [docs/custom-tasks.md](docs/custom-tasks.md#composite-tasks).
+
+```typescript
+async execute() {
+  for (const file of this.options.files) {
+    const r = await this.step('asset.import', { file });
+    if (!r.success) return r;
+  }
+  return { success: true };
+}
 ```
 
 ### Lifecycle hooks

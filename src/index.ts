@@ -2,8 +2,16 @@
 export { deepMerge } from './config/deep-merge.js';
 export {
   TaskOptionsSchema,
+  OptionSpecSchema,
+  OptionSpecsSchema,
+  OutputSpecSchema,
+  OutputSpecsSchema,
   TaskDefinitionSchema,
   FlowStepSchema,
+  StepCheckSchema,
+  FlowStepObjectSchema,
+  FlowStepsSchema,
+  refineFlowStep,
   FlowDefinitionSchema,
   AgentToolSchema,
   AgentBudgetSchema,
@@ -12,8 +20,13 @@ export {
 } from './config/schema.js';
 export type {
   TaskOptions,
+  OptionSpec,
+  OptionSpecs,
+  OutputSpec,
+  OutputSpecs,
   TaskDefinition,
   FlowStep,
+  StepCheck,
   FlowDefinition,
   AgentTool,
   AgentBudget,
@@ -22,6 +35,8 @@ export type {
 } from './config/schema.js';
 export { loadConfig, loadRawYaml, findConfigFile } from './config/loader.js';
 export type { LoadConfigOptions, LoadedConfig } from './config/loader.js';
+export { findUnknownKeys, assertKnownKeys, UnknownConfigKeyError } from './config/strict.js';
+export type { UnknownConfigKey, FindUnknownKeysOptions } from './config/strict.js';
 
 // Task
 export { BaseTask, DEFAULT_EXECUTION_PHASE, resolveTaskContext } from './task/base-task.js';
@@ -36,7 +51,27 @@ export type {
 export { ShellTask } from './task/shell-task.js';
 export type { ShellTaskOptions } from './task/shell-task.js';
 export { TaskRegistry } from './task/registry.js';
-export type { TaskConstructor } from './task/registry.js';
+export type { TaskConstructor, TaskDescription } from './task/registry.js';
+export {
+  TaskOptionsError,
+  validateTaskOptions,
+  assertTaskOptions,
+  applyOptionDefaults,
+  mergeOptionSpecs,
+  taskClassMetadata,
+} from './task/options-schema.js';
+export type { TaskClassMetadata, TaskOptionIssue } from './task/options-schema.js';
+export { deprecationWarning, mergeWarnings } from './task/warnings.js';
+export type { RunWarning, Deprecation } from './task/warnings.js';
+export { collectRollbackRecords } from './task/composite.js';
+export type {
+  ChildStepTarget,
+  ChildStepSpec,
+  ChildStepRunner,
+  ChildPlanEntry,
+  ExpandContext,
+  ExpandFunction,
+} from './task/composite.js';
 export { AgentPromptTask } from './task/agent-prompt-task.js';
 export type { AgentPromptOptions } from './task/agent-prompt-task.js';
 export { AgentTask } from './task/agent-task.js';
@@ -73,7 +108,7 @@ export type {
 } from './task/llm-provider.js';
 
 // Flow
-export { FlowRunner } from './flow/runner.js';
+export { FlowRunner, CheckFailedError } from './flow/runner.js';
 export type {
   FlowRunOptions,
   FlowStepResult,
@@ -83,6 +118,14 @@ export type {
   NestedAgentTask,
   NestedAgentTaskFactory,
   PlanStep,
+  FlowDescription,
+  StepReferenceIssue,
+  CheckOutcome,
+  PreflightStep,
+  PreflightResult,
+  ConditionContext,
+  ConditionEvaluator,
+  OptionsScope,
   HookPhase,
   HookError,
   RollbackResult,

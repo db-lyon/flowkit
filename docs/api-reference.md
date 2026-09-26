@@ -26,6 +26,7 @@ function loadConfig<T extends z.ZodType>(
 | `env` | `string` | no | Environment name — loads `{base}.{env}.{ext}` overlay |
 | `envVar` | `string` | no | Env var to read environment name from when `env` is not passed |
 | `configDir` | `string` | no | Directory to search (default: `process.cwd()`) |
+| `strict` | `boolean \| { passthroughKeys?: string[] }` | no | Reject keys the schema does not declare, with an `UnknownConfigKeyError`. Off by default. See [Strict validation](configuration.md#strict-validation) |
 
 **`LoadedConfig<T>`**
 
@@ -33,6 +34,31 @@ function loadConfig<T extends z.ZodType>(
 |-------|------|-------------|
 | `config` | `T` | The validated, merged configuration object |
 | `configDir` | `string` | The directory the config was loaded from |
+
+---
+
+### `findUnknownKeys(schema, value, options?)` / `assertKnownKeys(schema, value, options?)`
+
+The check behind `loadConfig({ strict })`, for config that does not come
+through the loader.
+
+```typescript
+interface UnknownConfigKey {
+  path: string;        // e.g. 'flows.ci.steps.2.retires', 'tasks["asset.list"].x'
+  key: string;
+  suggestion?: string; // nearest declared key, when close enough to be a typo
+}
+interface FindUnknownKeysOptions {
+  passthroughKeys?: readonly string[]; // top-level keys left unchecked
+}
+
+function findUnknownKeys(schema: z.ZodTypeAny, value: unknown, options?: FindUnknownKeysOptions): UnknownConfigKey[];
+function assertKnownKeys(schema: z.ZodTypeAny, value: unknown, options?: FindUnknownKeysOptions): void; // throws UnknownConfigKeyError
+
+class UnknownConfigKeyError extends Error {
+  readonly keys: UnknownConfigKey[];
+}
+```
 
 ---
 
@@ -75,8 +101,22 @@ function deepMerge(base: unknown, override: unknown): unknown
 | `TaskOptionsSchema` | `Record<string, unknown>` |
 | `TaskDefinitionSchema` | Task definition object |
 | `FlowStepSchema` | Single flow step (task xor flow) |
+| `FlowStepObjectSchema` | The same step fields as an unrefined `z.object`, for hosts to `.extend()` |
+| `FlowStepsSchema` | A `steps:` map keyed by step number |
 | `FlowDefinitionSchema` | Flow with description and steps |
 | `EngineConfigSchema` | Top-level config with `tasks` and `flows` |
+
+`refineFlowStep(schema)` applies the step target rule (exactly one of `task`
+or `flow`, or a `None` skip) to any step object schema, so a host manifest can
+reuse every step field the runner understands and add its own:
+
+```typescript
+import { FlowStepObjectSchema, refineFlowStep } from '@db-lyon/flowkit';
+
+const ManifestStepSchema = refineFlowStep(
+  FlowStepObjectSchema.extend({ label: z.string().optional() }),
+);
+```
 
 ---
 
@@ -131,8 +171,45 @@ abstract class BaseTask<TOpts = Record<string, unknown>> {
   abstract execute(): Promise<TaskResult>;
   protected validate(): void;
   async run(): Promise<TaskResult>;
+  protected resolve<T extends BaseTask>(taskName: string, options?: Record<string, unknown>): Promise<T>;
+  protected call(taskName: string, options?: Record<string, unknown>): Promise<TaskResult>;
+  protected step(
+    target: ChildStepTarget,
+    options?: Record<string, unknown>,
+    spec?: ChildStepSpec,
+  ): Promise<TaskResult>;
+
+  // Optional class-level declarations
+  static optionsSchema?: OptionSpecs;
+  static outputs?: OutputSpecs;
+  static description?: string;
+  static deprecated?: boolean | string;
+  static replacedBy?: string;
+  static expand?: ExpandFunction;
 }
+
+type ChildStepTarget = string | { task: string } | { flow: string };
+interface ChildStepSpec { retries?: number; retryDelay?: number; retryOn?: string }
+type ChildPlanEntry =
+  | { task: string; options?: Record<string, unknown> }
+  | { flow: string; options?: Record<string, unknown> };
+interface ExpandContext {
+  taskName: string;
+  taskDefinitions: Record<string, TaskDefinition>;
+  flows: Record<string, FlowDefinition>;
+  references?: Record<string, unknown>;
+}
+type ExpandFunction = (
+  options: Record<string, unknown>,
+  ctx: ExpandContext,
+) => ChildPlanEntry[] | null | Promise<ChildPlanEntry[] | null>;
+
+// Every rollback record in a result tree, children first; invoke in reverse.
+function collectRollbackRecords(result: TaskResult): RollbackRecord[];
 ```
+
+`step()` runs a composite child through the runner (`ctx.step`); see
+[Composite tasks](custom-tasks.md#composite-tasks).
 
 | Method | Description |
 |--------|-------------|
@@ -159,6 +236,8 @@ interface TaskContext {
   logger?: Logger;
   /** Cancels LLM work and retry backoff owned by this task invocation. */
   readonly signal?: AbortSignal;
+  /** Run one composite child through the runner. Supplied by FlowRunner. */
+  step?: (target: ChildStepTarget, options?: Record<string, unknown>, spec?: ChildStepSpec) => Promise<TaskResult>;
   [key: string]: unknown;
 }
 
@@ -204,8 +283,24 @@ interface TaskResult {
   data?: Record<string, unknown>;
   error?: Error;
   duration?: number;  // milliseconds, set by run()
+  rollback?: RollbackRecord;
+  warnings?: RunWarning[]; // non-fatal notices; the runner appends deprecation warnings
+  children?: FlowStepResult[]; // composite child steps run through ctx.step, set by the runner
+}
+
+interface RunWarning {
+  code: 'deprecated' | 'check';
+  message: string;
+  name: string;              // the task or flow it is about
+  kind?: 'task' | 'flow';
+  replacedBy?: string;       // for 'deprecated'
+  stepNumber?: number;       // for 'check'
 }
 ```
+
+`deprecationWarning(kind, name, deprecated, replacedBy)` builds the
+`deprecated` warning (or returns `undefined`), and `mergeWarnings(...lists)`
+concatenates lists without repeats, for a host that assembles its own.
 
 ---
 
@@ -280,6 +375,10 @@ class TaskRegistry {
     options: Record<string, unknown>,
   ): Promise<BaseTask>;
   listRegistered(): string[];
+  async describe(
+    name: string,
+    taskDefinitions?: Record<string, TaskDefinition>,
+  ): Promise<TaskDescription>;
 }
 ```
 
@@ -292,6 +391,56 @@ class TaskRegistry {
 | `resolve(nameOrPath)` | Look up a constructor. Falls back to dynamic filesystem import. |
 | `create(nameOrPath, ctx, opts)` | Resolve + instantiate in one call; omitted phase defaults to `task` |
 | `listRegistered()` | Return all registered names and class paths |
+| `describe(name, defs?)` | Class metadata folded with the configured definition. See below |
+
+**`TaskDescription`**
+
+```typescript
+interface TaskDescription {
+  name: string;
+  class_path: string;
+  description?: string;                 // definition, else the class's static description
+  group?: string;
+  options: Record<string, unknown>;     // schema defaults, then definition options (uninterpolated)
+  options_schema?: OptionSpecs;         // class optionsSchema refined by definition options_schema
+  outputs?: OutputSpecs;
+  idempotent?: boolean;
+  reversible?: boolean;
+}
+```
+
+**Option schemas**
+
+```typescript
+type OptionSpecs = Record<string, OptionSpec>;
+interface OptionSpec {
+  type?: OptionType | OptionType[]; // 'string' | 'number' | 'integer' | 'boolean' | 'object' | 'array' | 'null'
+  description?: string;
+  required?: boolean;
+  default?: unknown;
+  enum?: unknown[];
+  const?: unknown;
+  minimum?: number; maximum?: number; exclusiveMinimum?: number; exclusiveMaximum?: number;
+  minLength?: number; maxLength?: number; pattern?: string;
+  minItems?: number; maxItems?: number; items?: Record<string, unknown>;
+  properties?: Record<string, unknown>; additionalProperties?: boolean | Record<string, unknown>;
+  nullable?: boolean;
+}
+type OutputSpecs = Record<string, { type?: OptionType | OptionType[]; description?: string; items?: object; properties?: object }>;
+
+class TaskOptionsError extends Error {
+  readonly taskName: string;
+  readonly issues: { option: string; message: string }[];
+}
+
+function validateTaskOptions(specs: OptionSpecs | undefined, options: Record<string, unknown>): TaskOptionIssue[];
+function assertTaskOptions(taskName: string, specs: OptionSpecs | undefined, options: Record<string, unknown>): Record<string, unknown>; // defaults applied; throws TaskOptionsError
+function applyOptionDefaults(specs: OptionSpecs | undefined, options: Record<string, unknown>): Record<string, unknown>;
+function mergeOptionSpecs(base?: OptionSpecs, override?: OptionSpecs): OptionSpecs | undefined;
+function taskClassMetadata(ctor: unknown): TaskClassMetadata; // { description?, optionsSchema?, outputs? }
+```
+
+Zod: `OptionSpecSchema`, `OptionSpecsSchema`, `OutputSpecSchema`, `OutputSpecsSchema`.
 
 **`TaskConstructor`**
 
@@ -321,10 +470,106 @@ Orchestration engine that executes flows.
 class FlowRunner {
   constructor(config: FlowRunnerConfig);
   async run(options: FlowRunOptions): Promise<FlowRunResult>;
+  async runTask(taskName: string, options?: Record<string, unknown>): Promise<TaskResult>;
+  async describeTask(taskName: string): Promise<TaskDescription>;
+  describeFlow(flowName: string): FlowDescription;
+  checkStepReferences(flowName: string): StepReferenceIssue[];
+  async expandTask(taskName: string, options?: Record<string, unknown>): Promise<ChildPlanEntry[] | null>;
+  async preflight(
+    flowName: string,
+    params?: Record<string, unknown>,
+    options?: { skip?: string[] },
+  ): Promise<PreflightResult>;
   resolveExecutionPlan(
     flow: FlowDefinition,
     skipSet: Set<string>,
   ): PlanStep[];
+}
+```
+
+---
+
+**`StepReferenceIssue`**
+
+```typescript
+interface StepReferenceIssue {
+  flowName: string;
+  stepNumber: number;
+  phase?: HookPhase;
+  reference: string;                          // e.g. '${steps.deploy.url}'
+  kind: 'ambiguous' | 'unknown' | 'forward';
+  message: string;
+}
+```
+
+**Checks and preflight**
+
+```typescript
+type StepCheck = { when: string | boolean; action: 'error' | 'warn' | 'skip'; message?: string };
+
+interface CheckOutcome {
+  scope: 'flow' | 'step';
+  flowName: string;
+  stepNumber?: number;
+  name?: string;
+  path?: string;
+  when: string | boolean;
+  action: 'error' | 'warn' | 'skip';
+  message: string;      // declared, or one naming the condition
+  triggered: boolean;   // the condition was truthy
+  error?: Error;        // the evaluator threw
+}
+
+class CheckFailedError extends Error {
+  readonly outcome: CheckOutcome;
+}
+
+interface PreflightResult {
+  flowName: string;
+  ok: boolean;               // no `error` check fired
+  checks: CheckOutcome[];    // the flow's own
+  steps: PreflightStep[];
+  warnings?: RunWarning[];   // fired `warn` checks, deprecations
+}
+
+interface PreflightStep {
+  stepNumber: number;
+  type: 'task' | 'flow';
+  name: string;
+  path: string;              // '2/1', or '<phase>/<n>' for hooks
+  depth: number;
+  phase?: HookPhase;
+  status: 'run' | 'skip' | 'error' | 'unknown';
+  skipReason?: 'static' | 'check';
+  checks: CheckOutcome[];
+  deprecated?: boolean | string;
+  replaced_by?: string;
+}
+
+interface ConditionContext {
+  steps: FlowStepResult[];
+  params?: Record<string, unknown>;
+  context: TaskContext;
+  error?: { message: string; name: string; stack?: string; step?: string };
+  references?: Record<string, unknown>; // FlowRunnerConfig.references
+  step?: PlanStep;                      // the step being gated
+  check?: StepCheck;                    // set when evaluating a check
+  flowName?: string;
+}
+```
+
+**`FlowDescription`**
+
+```typescript
+interface FlowDescription {
+  name: string;
+  description?: string;
+  deprecated?: boolean | string;
+  replaced_by?: string;
+  rollback_on_failure?: boolean;
+  options_scope?: 'flat' | 'step';
+  checks?: StepCheck[];
+  steps: PlanStep[]; // main steps in run order
 }
 ```
 
@@ -344,6 +589,8 @@ interface FlowRunnerConfig {
   references?: Record<string, unknown>;
   agents?: Record<string, AgentDefinition>;
   nestedAgentTaskFactory?: NestedAgentTaskFactory;
+  optionsScope?: 'flat' | 'step'; // default for how `params` reach steps; default 'flat'
+  strictStepReferences?: boolean; // refuse ambiguous/unknown/forward ${steps.x}; default false
 }
 ```
 
@@ -380,6 +627,11 @@ interface FlowRunOptions {
   flowName: string;       // name of the flow to execute
   skip?: string[];        // task names or step numbers to skip
   plan?: boolean;         // return plan without executing
+  params?: Record<string, unknown>; // runtime options, highest precedence
+  optionsScope?: 'flat' | 'step';   // how `params` are addressed; see configuration.md
+  rollback_on_failure?: boolean;
+  expandNestedFlows?: boolean;      // plan mode: expand nested flows into child rows
+  expandComposites?: boolean;       // plan mode: list composite children from static expand()
 }
 ```
 
@@ -393,6 +645,10 @@ interface FlowRunResult {
   steps: FlowStepResult[];
   duration: number;       // total milliseconds
   error?: Error;          // first error that caused failure
+  hookErrors?: HookError[];
+  rollback?: RollbackResult;
+  warnings?: RunWarning[]; // deprecations and fired `warn` checks, without repeats
+  checks?: CheckOutcome[]; // every check that fired, nested flows included
 }
 ```
 
@@ -408,7 +664,12 @@ interface FlowStepResult {
   result?: TaskResult;
   skipped: boolean;
   duration: number;              // milliseconds
+  attempts?: number;
+  skipReason?: 'static' | 'when' | 'check';
+  ignoredFailure?: boolean;
+  checks?: CheckOutcome[];       // checks that fired for this step (and inside its flow)
   nestedSteps?: FlowStepResult[]; // for a `flow` step: the child's own steps
+  path?: string;                 // for a composite child step: e.g. '2/1'
 }
 ```
 
@@ -425,6 +686,18 @@ interface PlanStep {
   name: string;
   skipped: boolean;
   options?: Record<string, unknown>;
+  retries?: number;
+  retryDelay?: number;
+  retryOn?: string;
+  when?: string | boolean;
+  ignore_failure?: boolean;
+  checks?: StepCheck[];            // declared, unevaluated
+  phase?: HookPhase;               // hook steps only
+  path?: string;                   // expanded plans: hierarchical id, e.g. '2/1'
+  depth?: number;
+  deprecated?: boolean | string;   // plan mode: the target is deprecated
+  replaced_by?: string;
+  composite?: 'expanded' | 'opaque'; // plan mode with expandComposites
 }
 ```
 
