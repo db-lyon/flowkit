@@ -61,6 +61,7 @@ flows:
 |-------|------|----------|-------------|
 | `description` | `string` | yes | Human-readable flow description |
 | `steps` | `object` | yes | Steps keyed by number (execution order) |
+| `options_scope` | `'flat' \| 'step'` | no | How runtime `params` reach steps. See [Step-scoped runtime options](#step-scoped-runtime-options) |
 | `deprecated` | `boolean \| string` | no | Mark the flow deprecated. See [Deprecation](#deprecation) |
 | `replaced_by` | `string` | no | The flow to use instead, named in the deprecation warning |
 
@@ -100,6 +101,56 @@ flows:
 ```
 
 Runtime parameters passed to `FlowRunner.run({ params })` merge on top with the highest priority (**task defaults < step overrides < runtime params**).
+
+### Step-scoped runtime options
+
+By default runtime `params` are **flat**: every key is merged into every step's
+options, so `params: { environment: 'prod' }` reaches the build, the test and
+the deploy alike. Opt in to the **step** scope to address each step instead:
+
+```yaml
+flows:
+  release:
+    options_scope: step          # or FlowRunnerConfig.optionsScope / run({ optionsScope })
+    steps:
+      1: { task: build }
+      2: { flow: ci }            # ci: 1: lint, 2: test
+      3: { task: deploy }
+```
+
+```typescript
+await runner.run({
+  flowName: 'release',
+  params: {
+    deploy: { environment: 'prod' },   // every step running the `deploy` task
+    '2/2': { coverage: 90 },           // step 2 of the flow run by step 2 (ci's `test`)
+    '1': { target: 'release' },        // main step 1
+  },
+});
+```
+
+Under the step scope each `params` key is a **selector** and its value an
+options object:
+
+| Selector | Matches |
+|----------|---------|
+| a task name, e.g. `deploy` or `asset.list` (dots are part of the name) | every step running that task, anywhere in the run: main steps, nested flows and hook steps |
+| a step path, e.g. `3` or `2/1` | one main step; `/` descends into the flow a step runs, as in an expanded plan's `path` |
+
+- A path is more specific than a name: when both address a step, the path's
+  value wins on a shared key.
+- The scoped value takes the runtime slot in the precedence order, so it
+  still overrides task defaults, enclosing-flow overrides and step options.
+- A selector that matches no task name or step path, or a value that is not an
+  object, fails the run (and a plan) before anything starts, naming each bad key.
+- Hook steps are addressed by task name only.
+- The scope is fixed by the flow the run starts on. Nested flows follow it and
+  their own `options_scope` is ignored.
+- `when:` expressions and `conditionEvaluator` still receive `params` as passed.
+
+Resolution order for the scope: `run({ optionsScope })`, then the flow's
+`options_scope`, then `FlowRunnerConfig.optionsScope`, then `flat`. Nothing
+changes unless one of them says `step`.
 
 ### Step references
 

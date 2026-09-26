@@ -248,6 +248,23 @@ release:
     2: { task: deploy }
 ```
 
+### Step-scoped runtime options
+
+Runtime `params` reach every step by default. Opt in with `options_scope: step`
+(on the flow, the runner, or the run) to address them per step, by task name or
+by step path:
+
+```typescript
+await runner.run({
+  flowName: 'release',
+  optionsScope: 'step',
+  params: { deploy: { environment: 'prod' }, '2/1': { coverage: 90 } },
+});
+```
+
+A selector that matches no step fails the run before anything starts. See
+[docs/configuration.md](docs/configuration.md#step-scoped-runtime-options).
+
 ### Conditional steps (`when`)
 
 A step runs only when its `when` is truthy. It accepts a boolean, or a string

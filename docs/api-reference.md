@@ -471,6 +471,7 @@ interface FlowRunnerConfig {
   references?: Record<string, unknown>;
   agents?: Record<string, AgentDefinition>;
   nestedAgentTaskFactory?: NestedAgentTaskFactory;
+  optionsScope?: 'flat' | 'step'; // default for how `params` reach steps; default 'flat'
 }
 ```
 
@@ -507,6 +508,10 @@ interface FlowRunOptions {
   flowName: string;       // name of the flow to execute
   skip?: string[];        // task names or step numbers to skip
   plan?: boolean;         // return plan without executing
+  params?: Record<string, unknown>; // runtime options, highest precedence
+  optionsScope?: 'flat' | 'step';   // how `params` are addressed; see configuration.md
+  rollback_on_failure?: boolean;
+  expandNestedFlows?: boolean;      // plan mode: expand nested flows into child rows
 }
 ```
 

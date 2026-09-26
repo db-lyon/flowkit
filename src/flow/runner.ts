@@ -36,12 +36,38 @@ export type HookPhase = 'on_start' | 'on_success' | 'on_failure' | 'finally';
  */
 export type ParentOptions = Record<string, Record<string, unknown>>;
 
+/** How runtime `params` reach steps. See `FlowRunOptions.optionsScope`. */
+export type OptionsScope = 'flat' | 'step';
+
 export interface FlowRunOptions {
   flowName: string;
   skip?: string[];
   plan?: boolean;
-  /** Runtime parameters — merged into every step's options with highest priority. */
+  /**
+   * Runtime parameters, the highest-precedence option layer. Under the default
+   * `flat` scope every key is merged into every step's options. Under the
+   * `step` scope each key is a step selector and its value an options object
+   * for the matching steps only; see `optionsScope`.
+   */
   params?: Record<string, unknown>;
+  /**
+   * How `params` are addressed. `flat` (default) spreads every key into every
+   * step. `step` reads each key as a selector:
+   *
+   * - a task name (`deploy`, `asset.list`): every step running that task,
+   *   anywhere in the run, including nested flows and hook steps;
+   * - a step path (`2`, or `2/1` for step 1 of the flow run by step 2): that
+   *   one main step.
+   *
+   * and each value as the options for the matching steps. A path is more
+   * specific than a name and wins on a shared key. A selector matching no step,
+   * or a value that is not an object, fails the run before anything starts.
+   *
+   * Precedence: this option, then the flow's `options_scope`, then
+   * `FlowRunnerConfig.optionsScope`, then `flat`. It is fixed by the flow the
+   * run starts on; nested flows follow it.
+   */
+  optionsScope?: OptionsScope;
   /** If true, invoke rollback records from completed steps in reverse order on failure. */
   rollback_on_failure?: boolean;
   /**
@@ -238,6 +264,21 @@ export interface FlowRunnerConfig {
    * run as flow steps continue to use the registry path.
    */
   nestedAgentTaskFactory?: NestedAgentTaskFactory;
+  /**
+   * Default for how runtime `params` are addressed when neither the run nor
+   * the flow says. See `FlowRunOptions.optionsScope`. Default `flat`.
+   */
+  optionsScope?: OptionsScope;
+}
+
+/**
+ * Where a (possibly nested) flow execution sits inside the run that started
+ * it. Internal: fixed at the start of a run and handed down to nested flows.
+ */
+interface RunFrame {
+  /** Path of the step that ran this flow (`''` at the root), e.g. `2` or `2/1`. */
+  pathPrefix: string;
+  scope: OptionsScope;
 }
 
 // ---------------------------------------------------------------------------
@@ -255,6 +296,7 @@ export class FlowRunner {
   private references?: Record<string, unknown>;
   private agents: Record<string, AgentDefinition>;
   private nestedAgentTaskFactory: NestedAgentTaskFactory;
+  private optionsScope: OptionsScope;
   private runDepth = 0;
   /**
    * Reference scope outside any step: the host namespaces, no step results.
@@ -273,6 +315,7 @@ export class FlowRunner {
     this.references = config.references;
     this.baseReferences = { steps: [], namespaces: this.references };
     this.agents = config.agents ?? {};
+    this.optionsScope = config.optionsScope ?? 'flat';
     this.nestedAgentTaskFactory =
       config.nestedAgentTaskFactory ?? ((ctx, options) => new AgentTask(ctx, options));
 
@@ -546,13 +589,88 @@ export class FlowRunner {
   private async runWith(
     options: FlowRunOptions,
     parentOptions: ParentOptions,
+    frame?: RunFrame,
   ): Promise<FlowRunResult> {
     this.runDepth++;
     const isTopLevel = this.runDepth === 1;
     try {
-      return await this.executeFlow(options, isTopLevel, parentOptions);
+      return await this.executeFlow(options, isTopLevel, parentOptions, frame);
     } finally {
       this.runDepth--;
+    }
+  }
+
+  /** Path of a main step inside a frame: `3` at the root, `2/3` inside step 2's flow. */
+  private stepPath(frame: RunFrame, stepNumber: number): string {
+    return frame.pathPrefix ? `${frame.pathPrefix}/${stepNumber}` : String(stepNumber);
+  }
+
+  /**
+   * The runtime option layer one step receives. Flat: all of `params`.
+   * Step-scoped: the options under the step's task name, then under its path.
+   */
+  private runtimeOptionsFor(
+    step: PlanStep,
+    frame: RunFrame,
+    params: Record<string, unknown> | undefined,
+  ): Record<string, unknown> | undefined {
+    if (frame.scope === 'flat' || !params) return params;
+    const byName = params[step.name] as Record<string, unknown> | undefined;
+    // Hook steps carry synthetic step numbers and are addressed by name only.
+    const byPath =
+      step.phase === undefined
+        ? (params[this.stepPath(frame, step.stepNumber)] as Record<string, unknown> | undefined)
+        : undefined;
+    if (!byName && !byPath) return undefined;
+    return { ...byName, ...byPath };
+  }
+
+  /**
+   * Every selector a step-scoped `params` key may use for a run of `flowName`:
+   * task names anywhere in the tree (main and hook steps, nested flows
+   * included) and the paths of main task steps.
+   */
+  private collectSelectors(
+    flowName: string,
+    pathPrefix: string,
+    ancestors: Set<string>,
+    out: { names: Set<string>; paths: Set<string> },
+  ): void {
+    const flow = this.flows[flowName];
+    if (!flow || ancestors.has(flowName)) return;
+    const nextAncestors = new Set(ancestors).add(flowName);
+    const visit = (step: PlanStep, path: string | undefined): void => {
+      if (step.name === 'None') return;
+      if (step.type === 'task') {
+        out.names.add(step.name);
+        if (path !== undefined) out.paths.add(path);
+      } else {
+        this.collectSelectors(step.name, path ?? `${pathPrefix}/${step.phase}`, nextAncestors, out);
+      }
+    };
+    for (const step of this.resolveExecutionPlan(flow, new Set())) {
+      visit(step, pathPrefix ? `${pathPrefix}/${step.stepNumber}` : String(step.stepNumber));
+    }
+    for (const phase of ['on_start', 'on_success', 'on_failure', 'finally'] as const) {
+      for (const step of this.planHookSteps(flow[phase], phase, new Set(), 0)) visit(step, undefined);
+    }
+  }
+
+  /** Reject step-scoped `params` that address nothing or are not option objects. */
+  private checkScopedParams(flowName: string, params: Record<string, unknown> | undefined): void {
+    if (!params) return;
+    const selectors = { names: new Set<string>(), paths: new Set<string>() };
+    this.collectSelectors(flowName, '', new Set(), selectors);
+    const problems: string[] = [];
+    for (const [key, value] of Object.entries(params)) {
+      if (!selectors.names.has(key) && !selectors.paths.has(key)) {
+        problems.push(`"${key}" matches no task name or step path in flow "${flowName}"`);
+      } else if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        problems.push(`"${key}" must map to an object of options`);
+      }
+    }
+    if (problems.length > 0) {
+      throw new Error(`Invalid step-scoped params: ${problems.join('; ')}`);
     }
   }
 
@@ -703,6 +821,7 @@ export class FlowRunner {
     options: FlowRunOptions,
     isTopLevel: boolean,
     parentOptions: ParentOptions,
+    inheritedFrame?: RunFrame,
   ): Promise<FlowRunResult> {
     const startTime = Date.now();
     const skipSet = new Set(options.skip ?? []);
@@ -723,6 +842,20 @@ export class FlowRunner {
 
     const executionPlan = this.resolveExecutionPlan(flow, skipSet);
     const flowDeprecation = deprecationWarning('flow', options.flowName, flow.deprecated, flow.replaced_by);
+
+    // The flow a run starts on fixes how its params are addressed; nested
+    // flows inherit that rather than reading their own `options_scope`.
+    const frame: RunFrame = inheritedFrame ?? {
+      pathPrefix: '',
+      scope: options.optionsScope ?? flow.options_scope ?? this.optionsScope,
+    };
+    if (!inheritedFrame && frame.scope === 'step') {
+      try {
+        this.checkScopedParams(options.flowName, options.params);
+      } catch (err) {
+        return { success: false, steps: [], duration: Date.now() - startTime, error: err as Error };
+      }
+    }
 
     // Plan mode — dump all phases for visibility, nothing runs.
     if (options.plan) {
@@ -788,6 +921,7 @@ export class FlowRunner {
           undefined,
           hookErrors,
           hookWarnings,
+          frame,
         );
         if (!ok) {
           flowError = hookErrors[hookErrors.length - 1]?.error;
@@ -861,7 +995,7 @@ export class FlowRunner {
           if (planStep.type === 'task') {
             const { result: taskResult, attempts } = await this.executeTaskStepWithRetry(
               planStep,
-              options.params,
+              this.runtimeOptionsFor(planStep, frame, options.params),
               completedSteps,
               parentOptions,
             );
@@ -898,6 +1032,7 @@ export class FlowRunner {
                 rollbackOwnedByAncestor: rollbackEnabled || ancestorOwnsRollback,
               },
               childParentOptions,
+              { ...frame, pathPrefix: this.stepPath(frame, planStep.stepNumber) },
             );
             stepResult = {
               stepNumber: planStep.stepNumber,
@@ -986,6 +1121,7 @@ export class FlowRunner {
           { error: flowError, step: flowErrorStepName },
           hookErrors,
           hookWarnings,
+          frame,
         );
       }
     } else {
@@ -999,6 +1135,7 @@ export class FlowRunner {
           undefined,
           hookErrors,
           hookWarnings,
+          frame,
         );
       }
     }
@@ -1021,6 +1158,7 @@ export class FlowRunner {
           flowError ? { error: flowError, step: flowErrorStepName } : undefined,
           hookErrors,
           hookWarnings,
+          frame,
         );
       }
     }
@@ -1054,7 +1192,8 @@ export class FlowRunner {
     parentOptions: ParentOptions,
     errorCtx: { error: Error; step?: string } | undefined,
     hookErrors: HookError[],
-    hookWarnings: RunWarning[] = [],
+    hookWarnings: RunWarning[],
+    frame: RunFrame,
   ): Promise<boolean> {
     if (hookStep.skipped) return true;
 
@@ -1093,6 +1232,9 @@ export class FlowRunner {
             rollbackOwnedByAncestor: false,
           },
           childParentOptions,
+          // Hook flows are addressed by task name only; the phase keeps their
+          // steps off every main-step path.
+          { ...frame, pathPrefix: `${frame.pathPrefix ? `${frame.pathPrefix}/` : ''}${hookStep.phase}` },
         );
         if (nested.warnings) hookWarnings.push(...nested.warnings);
         if (!nested.success) {
@@ -1108,7 +1250,7 @@ export class FlowRunner {
 
       const { result } = await this.executeTaskStepWithRetry(
         hookStep,
-        options.params,
+        this.runtimeOptionsFor(hookStep, frame, options.params),
         completedSteps,
         parentOptions,
         errorCtx,

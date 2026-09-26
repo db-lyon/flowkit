@@ -161,6 +161,13 @@ export const FlowDefinitionSchema = z.object({
   finally: z.array(FlowStepSchema).optional(),
   /** If true, invoke rollback records from completed steps in reverse order on failure. */
   rollback_on_failure: z.boolean().optional(),
+  /**
+   * How runtime `params` reach the steps of a run started on this flow.
+   * `flat` (the default): every key goes to every step. `step`: each key is a
+   * step selector (a task name or a step path such as `2` or `2/1`) whose value
+   * is the options for the matching steps only.
+   */
+  options_scope: z.enum(['flat', 'step']).optional(),
   /** Mark the flow deprecated: `true`, or a string saying why. It still runs. */
   deprecated: DeprecatedSchema.optional(),
   /** The flow to use instead, named in the deprecation warning. */

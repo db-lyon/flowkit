@@ -108,6 +108,7 @@ export type {
   NestedAgentTaskFactory,
   PlanStep,
   FlowDescription,
+  OptionsScope,
   HookPhase,
   HookError,
   RollbackResult,
