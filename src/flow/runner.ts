@@ -84,7 +84,7 @@ export interface FlowStepResult {
   duration: number;
   /** Number of attempts including the first try (≥1 when executed). */
   attempts?: number;
-  /** Why the step was skipped: 'static' (skip list / task: None) or 'when' (condition false). */
+  /** Why the step was skipped: 'static' (skip list / task: None / flow: None) or 'when' (condition false). */
   skipReason?: 'static' | 'when';
   /** True when the step failed but `ignore_failure` let the flow continue. */
   ignoredFailure?: boolean;
@@ -459,6 +459,9 @@ export class FlowRunner {
   private planStepFromDef(step: FlowStep, stepNumber: number, skipSet: Set<string>): PlanStep {
     if (step.task === 'None') {
       return { stepNumber, type: 'task', name: 'None', skipped: true };
+    }
+    if (step.flow === 'None') {
+      return { stepNumber, type: 'flow', name: 'None', skipped: true };
     }
     const name = (step.task ?? step.flow)!;
     const type: 'task' | 'flow' = step.task ? 'task' : 'flow';

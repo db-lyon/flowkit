@@ -296,7 +296,7 @@ Or mark a step as permanently skipped in YAML:
 ```yaml
 steps:
   3:
-    task: None
+    task: None   # or `flow: None` for a step that ran a flow
 ```
 
 ### Plan mode

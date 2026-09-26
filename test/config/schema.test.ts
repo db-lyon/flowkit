@@ -65,6 +65,16 @@ describe('FlowStepSchema', () => {
     expect(FlowStepSchema.parse({ task: 'None' }).task).toBe('None');
   });
 
+  it('accepts flow: None (skip sentinel)', () => {
+    expect(FlowStepSchema.parse({ flow: 'None' }).flow).toBe('None');
+  });
+
+  it('accepts a flow step switched off by an overlay with flow: None', () => {
+    // The merged shape when an overlay disables a task step with `flow: None`.
+    expect(() => FlowStepSchema.parse({ task: 'deploy', flow: 'None' })).not.toThrow();
+    expect(() => FlowStepSchema.parse({ task: 'None', flow: 'provision' })).not.toThrow();
+  });
+
   it('accepts step with options', () => {
     const result = FlowStepSchema.parse({ task: 'deploy', options: { path: 'metadata' } });
     expect(result.options).toEqual({ path: 'metadata' });

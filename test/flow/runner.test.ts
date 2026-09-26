@@ -317,6 +317,39 @@ describe('FlowRunner', () => {
     expect(result.steps[1].name).toBe('None');
   });
 
+  it('handles flow: None as auto-skip, in the run and in the plan', async () => {
+    const log: string[] = [];
+    const runner = makeRunner(
+      { rec: { class_path: 'test.Record', options: {} } },
+      {
+        inner: { description: 'inner', steps: { '1': { task: 'rec', options: { label: 'inner' } } } },
+        test: {
+          description: 'None test',
+          steps: {
+            '1': { task: 'rec', options: { label: 'a' } },
+            '2': { flow: 'None' },
+            '3': { flow: 'inner', task: 'None' },
+            '4': { task: 'rec', options: { label: 'c' } },
+          },
+        },
+      },
+      { __log: log },
+    );
+    const result = await runner.run({ flowName: 'test' });
+    expect(result.success).toBe(true);
+    expect(log).toEqual(['a', 'c']);
+    expect(result.steps[1]).toMatchObject({ type: 'flow', name: 'None', skipped: true, skipReason: 'static' });
+    expect(result.steps[2]).toMatchObject({ name: 'None', skipped: true });
+
+    const plan = await runner.run({ flowName: 'test', plan: true, expandNestedFlows: true });
+    expect(plan.steps.map((s) => [s.name, s.skipped])).toEqual([
+      ['rec', false],
+      ['None', true],
+      ['None', true],
+      ['rec', false],
+    ]);
+  });
+
   it('returns plan without executing', async () => {
     const log: string[] = [];
     const runner = makeRunner(

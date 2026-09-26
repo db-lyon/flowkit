@@ -49,6 +49,8 @@ flows:
         flow: other_flow            # reference another flow (nesting)
       3:
         task: None                  # skip sentinel — step is always skipped
+      4:
+        flow: None                  # same, for a step that referenced a flow
 ```
 
 | Field | Type | Required | Description |
@@ -58,7 +60,7 @@ flows:
 
 ### Flow step
 
-Each step must have exactly one of `task` or `flow` (mutually exclusive), unless `task: None` is used to mark a skipped step.
+Each step must have exactly one of `task` or `flow` (mutually exclusive), unless `task: None` or `flow: None` is used to mark a skipped step. `None` in either slot wins, so an overlay can switch off an inherited step by number whichever key the base used.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|

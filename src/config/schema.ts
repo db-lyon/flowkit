@@ -41,10 +41,13 @@ export const FlowStepSchema = z
   })
   .refine(
     (data) => {
-      if (data.task === 'None') return true;
+      // `None` in either slot disables the step. An overlay that turns a
+      // `flow:` step off with `task: None` (or the reverse) merges into a step
+      // carrying both keys, and that must still parse as a skip.
+      if (data.task === 'None' || data.flow === 'None') return true;
       return (data.task && !data.flow) || (!data.task && data.flow);
     },
-    { message: 'Step must have exactly one of task or flow (or task: None to skip)' },
+    { message: 'Step must have exactly one of task or flow (or task: None / flow: None to skip)' },
   );
 
 export const FlowDefinitionSchema = z.object({
