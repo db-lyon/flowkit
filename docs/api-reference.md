@@ -75,8 +75,22 @@ function deepMerge(base: unknown, override: unknown): unknown
 | `TaskOptionsSchema` | `Record<string, unknown>` |
 | `TaskDefinitionSchema` | Task definition object |
 | `FlowStepSchema` | Single flow step (task xor flow) |
+| `FlowStepObjectSchema` | The same step fields as an unrefined `z.object`, for hosts to `.extend()` |
+| `FlowStepsSchema` | A `steps:` map keyed by step number |
 | `FlowDefinitionSchema` | Flow with description and steps |
 | `EngineConfigSchema` | Top-level config with `tasks` and `flows` |
+
+`refineFlowStep(schema)` applies the step target rule (exactly one of `task`
+or `flow`, or a `None` skip) to any step object schema, so a host manifest can
+reuse every step field the runner understands and add its own:
+
+```typescript
+import { FlowStepObjectSchema, refineFlowStep } from '@db-lyon/flowkit';
+
+const ManifestStepSchema = refineFlowStep(
+  FlowStepObjectSchema.extend({ label: z.string().optional() }),
+);
+```
 
 ---
 

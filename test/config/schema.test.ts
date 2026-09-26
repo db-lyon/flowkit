@@ -1,7 +1,11 @@
 import { describe, it, expect } from 'vitest';
+import { z } from 'zod';
 import {
   TaskDefinitionSchema,
   FlowStepSchema,
+  FlowStepObjectSchema,
+  FlowStepsSchema,
+  refineFlowStep,
   FlowDefinitionSchema,
   AgentDefinitionSchema,
   EngineConfigSchema,
@@ -167,5 +171,28 @@ describe('AgentDefinitionSchema', () => {
 
   it('rejects a tool with no reference or name', () => {
     expect(() => AgentDefinitionSchema.parse({ tools: [{ description: 'x' }] })).toThrow();
+  });
+});
+
+describe('shared step schemas', () => {
+  it('lets a host extend the step object and keep the target rule', () => {
+    const ManifestStep = refineFlowStep(FlowStepObjectSchema.extend({ label: z.string().optional() }));
+    const parsed = ManifestStep.parse({ task: 'deploy', label: 'x', when: '${env.CI}', ignore_failure: true });
+    expect(parsed).toMatchObject({ task: 'deploy', label: 'x', ignore_failure: true });
+    expect(ManifestStep.parse({ task: 'None' }).task).toBe('None');
+    expect(() => ManifestStep.parse({ task: 'a', flow: 'b' })).toThrow(/exactly one of task or flow/);
+    expect(() => ManifestStep.parse({})).toThrow();
+  });
+
+  it('parses a steps map keyed by number', () => {
+    const steps = FlowStepsSchema.parse({ 1: { task: 'a' }, 20: { flow: 'b' } });
+    expect(Object.keys(steps)).toEqual(['1', '20']);
+  });
+
+  it('FlowStepSchema is the refined FlowStepObjectSchema', () => {
+    expect(Object.keys(FlowStepObjectSchema.shape)).toEqual(
+      expect.arrayContaining(['task', 'flow', 'options', 'retries', 'when', 'ignore_failure']),
+    );
+    expect(() => FlowStepSchema.parse({})).toThrow();
   });
 });

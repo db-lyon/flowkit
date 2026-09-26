@@ -363,3 +363,21 @@ const { config } = loadConfig({
 
 // config.tasks, config.flows, config.database, config.features
 ```
+
+### Reusing the step and flow schemas
+
+A host that declares flows outside the main config file (a plugin manifest, a
+flow built in code) should validate them with flowkit's own schemas rather than
+a copy, so every step field (`when`, `ignore_failure`, `retries`, `None` skips,
+and whatever is added later) keeps working there too.
+
+```typescript
+import { FlowDefinitionSchema, FlowStepObjectSchema, refineFlowStep } from '@db-lyon/flowkit';
+
+// A whole flow, with a host-only field.
+const ManifestFlowSchema = FlowDefinitionSchema.extend({ group: z.string().optional() });
+
+// A step with a host-only field. `FlowStepSchema` is refined and cannot be
+// extended, so extend the object form and refine it again.
+const ManifestStepSchema = refineFlowStep(FlowStepObjectSchema.extend({ label: z.string().optional() }));
+```

@@ -48,6 +48,15 @@ import type {
   TaskContextInput as TaskTaskContextInput,
 } from '@db-lyon/flowkit/task';
 import { BaseTask as RootBaseTask } from '@db-lyon/flowkit';
+import {
+  FlowStepObjectSchema as RootFlowStepObjectSchema,
+  FlowStepsSchema as RootFlowStepsSchema,
+  refineFlowStep as rootRefineFlowStep,
+} from '@db-lyon/flowkit';
+import {
+  FlowStepObjectSchema as ConfigFlowStepObjectSchema,
+  refineFlowStep as configRefineFlowStep,
+} from '@db-lyon/flowkit/config';
 
 const signal = new AbortController().signal;
 const rootOptions: RootShellTaskOptions = { command: 'echo root', signal };
@@ -218,3 +227,11 @@ void invalidNestedAgentTask;
 void rootRunnerWithNestedFactory;
 void flowRunnerWithNestedFactory;
 void invalidPhase;
+
+// A host reuses the step schema for its own manifests.
+const hostStepSchema = rootRefineFlowStep(RootFlowStepObjectSchema.extend({}));
+const configStepSchema = configRefineFlowStep(ConfigFlowStepObjectSchema);
+const hostStep: { task?: string; when?: string | boolean } = hostStepSchema.parse({ task: 'a' });
+void hostStep;
+void configStepSchema;
+void RootFlowStepsSchema;

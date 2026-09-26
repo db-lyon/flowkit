@@ -18,37 +18,61 @@ export const TaskDefinitionSchema = z.object({
   reversible: z.boolean().optional(),
 });
 
-export const FlowStepSchema = z
-  .object({
-    task: z.string().optional(),
-    flow: z.string().optional(),
-    options: TaskOptionsSchema.optional(),
-    /** Retry the step up to N additional times on failure. */
-    retries: z.number().int().nonnegative().optional(),
-    /** Delay between retries, in milliseconds. */
-    retryDelay: z.number().int().nonnegative().optional(),
-    /** Only retry when the error message contains this substring. */
-    retryOn: z.string().optional(),
-    /**
-     * Conditional execution. A boolean runs/skips the step directly; a string is
-     * an expression evaluated at runtime by the runner's `conditionEvaluator`
-     * (or the built-in `${...}`-reference truthiness check if none is set). A
-     * falsy result skips the step without failing the flow.
-     */
-    when: z.union([z.string(), z.boolean()]).optional(),
-    /** If true, a failure of this step is recorded but does not abort the flow. */
-    ignore_failure: z.boolean().optional(),
-  })
-  .refine(
-    (data) => {
-      // `None` in either slot disables the step. An overlay that turns a
-      // `flow:` step off with `task: None` (or the reverse) merges into a step
-      // carrying both keys, and that must still parse as a skip.
-      if (data.task === 'None' || data.flow === 'None') return true;
-      return (data.task && !data.flow) || (!data.task && data.flow);
-    },
-    { message: 'Step must have exactly one of task or flow (or task: None / flow: None to skip)' },
-  );
+/**
+ * The fields of one flow step, as a plain object schema.
+ *
+ * Exported unrefined so a host can `.extend()` it for its own manifests (a
+ * plugin manifest, a code-declared flow) and stay in step with every field the
+ * runner understands. Pass the extended schema through `refineFlowStep` to get
+ * the same target rule `FlowStepSchema` enforces.
+ */
+export const FlowStepObjectSchema = z.object({
+  task: z.string().optional(),
+  flow: z.string().optional(),
+  options: TaskOptionsSchema.optional(),
+  /** Retry the step up to N additional times on failure. */
+  retries: z.number().int().nonnegative().optional(),
+  /** Delay between retries, in milliseconds. */
+  retryDelay: z.number().int().nonnegative().optional(),
+  /** Only retry when the error message contains this substring. */
+  retryOn: z.string().optional(),
+  /**
+   * Conditional execution. A boolean runs/skips the step directly; a string is
+   * an expression evaluated at runtime by the runner's `conditionEvaluator`
+   * (or the built-in `${...}`-reference truthiness check if none is set). A
+   * falsy result skips the step without failing the flow.
+   */
+  when: z.union([z.string(), z.boolean()]).optional(),
+  /** If true, a failure of this step is recorded but does not abort the flow. */
+  ignore_failure: z.boolean().optional(),
+});
+
+/** The target rule shared by every step schema: exactly one of task or flow, or a `None` skip. */
+function hasOneStepTarget(data: { task?: string; flow?: string }): boolean {
+  // `None` in either slot disables the step. An overlay that turns a
+  // `flow:` step off with `task: None` (or the reverse) merges into a step
+  // carrying both keys, and that must still parse as a skip.
+  if (data.task === 'None' || data.flow === 'None') return true;
+  return (!!data.task && !data.flow) || (!data.task && !!data.flow);
+}
+
+/**
+ * Apply the step target rule to a step object schema, typically one a host
+ * built with `FlowStepObjectSchema.extend({ ... })`.
+ */
+export function refineFlowStep<T extends z.ZodType<{ task?: string; flow?: string }>>(
+  schema: T,
+): z.ZodEffects<T> {
+  return schema.refine(hasOneStepTarget, {
+    message: 'Step must have exactly one of task or flow (or task: None / flow: None to skip)',
+  });
+}
+
+/** One flow step: `FlowStepObjectSchema` with the target rule applied. */
+export const FlowStepSchema = refineFlowStep(FlowStepObjectSchema);
+
+/** A flow's `steps:` map, keyed by step number. */
+export const FlowStepsSchema = z.record(z.coerce.string(), FlowStepSchema);
 
 export const FlowDefinitionSchema = z.object({
   /**
@@ -57,7 +81,7 @@ export const FlowDefinitionSchema = z.object({
    */
   description: z.string().nullish(),
   /** Optional/defaulted so an override that only adjusts hooks/options is valid. */
-  steps: z.record(z.coerce.string(), FlowStepSchema).default({}),
+  steps: FlowStepsSchema.default({}),
   /** Runs before the first step. Failure fails the flow before steps execute. */
   on_start: z.array(FlowStepSchema).optional(),
   /** Runs after all steps succeed. */
