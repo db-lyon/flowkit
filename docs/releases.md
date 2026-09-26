@@ -1,6 +1,6 @@
 # Release notes
 
-## Unreleased
+## 0.18.0
 
 Task and flow primitives for hosts that model every action as a task, a flow
 or a composite. Everything here is additive or opt-in: a config and a host
