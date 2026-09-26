@@ -244,8 +244,23 @@ interface TaskResult {
   data?: Record<string, unknown>;
   error?: Error;
   duration?: number;  // milliseconds, set by run()
+  rollback?: RollbackRecord;
+  warnings?: RunWarning[]; // non-fatal notices; the runner appends deprecation warnings
+}
+
+interface RunWarning {
+  code: 'deprecated' | 'check';
+  message: string;
+  name: string;              // the task or flow it is about
+  kind?: 'task' | 'flow';
+  replacedBy?: string;       // for 'deprecated'
+  stepNumber?: number;       // for 'check'
 }
 ```
+
+`deprecationWarning(kind, name, deprecated, replacedBy)` builds the
+`deprecated` warning (or returns `undefined`), and `mergeWarnings(...lists)`
+concatenates lists without repeats, for a host that assembles its own.
 
 ---
 
@@ -417,10 +432,26 @@ class FlowRunner {
   async run(options: FlowRunOptions): Promise<FlowRunResult>;
   async runTask(taskName: string, options?: Record<string, unknown>): Promise<TaskResult>;
   async describeTask(taskName: string): Promise<TaskDescription>;
+  describeFlow(flowName: string): FlowDescription;
   resolveExecutionPlan(
     flow: FlowDefinition,
     skipSet: Set<string>,
   ): PlanStep[];
+}
+```
+
+---
+
+**`FlowDescription`**
+
+```typescript
+interface FlowDescription {
+  name: string;
+  description?: string;
+  deprecated?: boolean | string;
+  replaced_by?: string;
+  rollback_on_failure?: boolean;
+  steps: PlanStep[]; // main steps in run order
 }
 ```
 
@@ -489,6 +520,9 @@ interface FlowRunResult {
   steps: FlowStepResult[];
   duration: number;       // total milliseconds
   error?: Error;          // first error that caused failure
+  hookErrors?: HookError[];
+  rollback?: RollbackResult;
+  warnings?: RunWarning[]; // deprecations and fired `warn` checks, without repeats
 }
 ```
 
@@ -521,6 +555,16 @@ interface PlanStep {
   name: string;
   skipped: boolean;
   options?: Record<string, unknown>;
+  retries?: number;
+  retryDelay?: number;
+  retryOn?: string;
+  when?: string | boolean;
+  ignore_failure?: boolean;
+  phase?: HookPhase;               // hook steps only
+  path?: string;                   // expanded plans: hierarchical id, e.g. '2/1'
+  depth?: number;
+  deprecated?: boolean | string;   // plan mode: the target is deprecated
+  replaced_by?: string;
 }
 ```
 

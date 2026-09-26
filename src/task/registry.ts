@@ -39,6 +39,10 @@ export interface TaskDescription {
   outputs?: OutputSpecs;
   idempotent?: boolean;
   reversible?: boolean;
+  /** The definition's `deprecated`, else the class's static one. */
+  deprecated?: boolean | string;
+  /** The definition's `replaced_by`, else the class's static `replacedBy`. */
+  replaced_by?: string;
 }
 
 export class TaskRegistry {
@@ -169,6 +173,10 @@ export class TaskRegistry {
     if (outputs) out.outputs = outputs;
     if (def?.idempotent !== undefined) out.idempotent = def.idempotent;
     if (def?.reversible !== undefined) out.reversible = def.reversible;
+    const deprecated = def?.deprecated ?? meta.deprecated;
+    if (deprecated) out.deprecated = deprecated;
+    const replacedBy = def?.replaced_by ?? meta.replacedBy;
+    if (replacedBy !== undefined) out.replaced_by = replacedBy;
     return out;
   }
 

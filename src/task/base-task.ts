@@ -6,6 +6,7 @@ import type { TaskDefinition, OptionSpecs, OutputSpecs } from '../config/schema.
 import type { TokenLedger } from './token-ledger.js';
 import type { ReferenceContext } from '../references.js';
 import { resolveTaskCall } from './task-resolution.js';
+import type { RunWarning } from './warnings.js';
 
 /**
  * Ambient state handed to a task at construction.
@@ -149,6 +150,11 @@ export interface TaskResult {
   error?: Error;
   duration?: number;
   rollback?: RollbackRecord;
+  /**
+   * Non-fatal notices added by the runner, e.g. that the task is deprecated.
+   * A task may add its own; the runner appends rather than replaces.
+   */
+  warnings?: RunWarning[];
 }
 
 export abstract class BaseTask<TOpts = Record<string, unknown>> {
@@ -162,6 +168,10 @@ export abstract class BaseTask<TOpts = Record<string, unknown>> {
   declare static outputs?: OutputSpecs;
   /** Fallback description when the task definition has none. */
   declare static description?: string;
+  /** Mark every use of the class deprecated. A definition's `deprecated` overrides it. */
+  declare static deprecated?: boolean | string;
+  /** The replacement named in the deprecation warning. */
+  declare static replacedBy?: string;
 
   protected logger: Logger;
   /**

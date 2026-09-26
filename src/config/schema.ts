@@ -2,6 +2,9 @@ import { z } from 'zod';
 
 export const TaskOptionsSchema = z.record(z.unknown());
 
+/** `deprecated:` on a task or flow: `true`, or a string saying why. */
+const DeprecatedSchema = z.union([z.boolean(), z.string()]);
+
 const OptionTypeSchema = z.enum(['string', 'number', 'integer', 'boolean', 'object', 'array', 'null']);
 
 /**
@@ -75,6 +78,13 @@ export const TaskDefinitionSchema = z.object({
   options_schema: OptionSpecsSchema.optional(),
   /** Declared outputs, for `describe` and docs. Not enforced. */
   outputs: OutputSpecsSchema.optional(),
+  /**
+   * Mark the task deprecated: `true`, or a string saying why. Running or
+   * planning it adds a `deprecated` warning to the result; it still runs.
+   */
+  deprecated: DeprecatedSchema.optional(),
+  /** The task to use instead, named in the deprecation warning. */
+  replaced_by: z.string().optional(),
 });
 
 /**
@@ -151,6 +161,10 @@ export const FlowDefinitionSchema = z.object({
   finally: z.array(FlowStepSchema).optional(),
   /** If true, invoke rollback records from completed steps in reverse order on failure. */
   rollback_on_failure: z.boolean().optional(),
+  /** Mark the flow deprecated: `true`, or a string saying why. It still runs. */
+  deprecated: DeprecatedSchema.optional(),
+  /** The flow to use instead, named in the deprecation warning. */
+  replaced_by: z.string().optional(),
 });
 
 // ---------------------------------------------------------------------------

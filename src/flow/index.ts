@@ -8,4 +8,5 @@ export type {
   NestedAgentTask,
   NestedAgentTaskFactory,
   PlanStep,
+  FlowDescription,
 } from './runner.js';

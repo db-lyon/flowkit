@@ -35,6 +35,8 @@ tasks:
 | `options` | `object` | no | Default options (merged with step-level overrides) |
 | `options_schema` | `object` | no | Declared options, refining the class's `optionsSchema`. See [Declaring options](custom-tasks.md#declaring-options) |
 | `outputs` | `object` | no | Declared `data` outputs (`type`, `description`), for `describe`. Not enforced |
+| `deprecated` | `boolean \| string` | no | Mark the task deprecated. See [Deprecation](#deprecation) |
+| `replaced_by` | `string` | no | The task to use instead, named in the deprecation warning |
 
 ### Flow definition
 
@@ -59,6 +61,8 @@ flows:
 |-------|------|----------|-------------|
 | `description` | `string` | yes | Human-readable flow description |
 | `steps` | `object` | yes | Steps keyed by number (execution order) |
+| `deprecated` | `boolean \| string` | no | Mark the flow deprecated. See [Deprecation](#deprecation) |
+| `replaced_by` | `string` | no | The flow to use instead, named in the deprecation warning |
 
 ### Flow step
 
@@ -230,6 +234,39 @@ steps:
 ```
 
 Returns `{ text, parsed?, usage? }`. Provider failures become step failures; missing provider is a clear error.
+
+### Deprecation
+
+Tasks and flows can be retired without breaking the configs that still use
+them. A deprecated task or flow still runs; the run and the plan say so:
+
+```yaml
+tasks:
+  deploy_legacy:
+    class_path: tasks.Deploy
+    deprecated: "Targets the old cluster."   # or just `true`
+    replaced_by: deploy
+
+flows:
+  release_v1:
+    deprecated: true
+    replaced_by: release
+    steps:
+      1: { task: deploy_legacy }
+```
+
+- A run collects a structured warning for every deprecated task or flow it
+  ran, on the step's `result.warnings` and, without repeats, on
+  `FlowRunResult.warnings`:
+  `{ code: 'deprecated', kind: 'task', name: 'deploy_legacy', replacedBy: 'deploy', message: 'Task "deploy_legacy" is deprecated: Targets the old cluster. Use "deploy" instead.' }`.
+  `runTask` puts it on the returned `TaskResult.warnings`. The runner's logger
+  gets it at `warn` too.
+- Plan mode marks each deprecated row with `deprecated` and `replaced_by` and
+  returns the same warnings on the plan's `warnings`. Skipped steps are not
+  reported.
+- A task class can declare `static deprecated` and `static replacedBy`; a
+  definition's `deprecated` (including `false`) overrides the class.
+- `FlowRunner.describeTask(name)` and `describeFlow(name)` expose both fields.
 
 ## Config layering
 

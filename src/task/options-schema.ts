@@ -17,6 +17,8 @@ export interface TaskClassMetadata {
   description?: string;
   optionsSchema?: OptionSpecs;
   outputs?: OutputSpecs;
+  deprecated?: boolean | string;
+  replacedBy?: string;
 }
 
 /** Read a task class's static metadata. Tolerates any value. */
@@ -27,6 +29,8 @@ export function taskClassMetadata(ctor: unknown): TaskClassMetadata {
   if (typeof c.description === 'string') out.description = c.description;
   if (isRecord(c.optionsSchema)) out.optionsSchema = c.optionsSchema as OptionSpecs;
   if (isRecord(c.outputs)) out.outputs = c.outputs as OutputSpecs;
+  if (typeof c.deprecated === 'boolean' || typeof c.deprecated === 'string') out.deprecated = c.deprecated;
+  if (typeof c.replacedBy === 'string') out.replacedBy = c.replacedBy;
   return out;
 }
 

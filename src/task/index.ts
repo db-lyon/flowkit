@@ -20,6 +20,8 @@ export {
   taskClassMetadata,
 } from './options-schema.js';
 export type { TaskClassMetadata, TaskOptionIssue } from './options-schema.js';
+export { deprecationWarning, mergeWarnings } from './warnings.js';
+export type { RunWarning, Deprecation } from './warnings.js';
 
 // Agent / LLM
 export { AgentPromptTask } from './agent-prompt-task.js';

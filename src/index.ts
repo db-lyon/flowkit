@@ -59,6 +59,8 @@ export {
   taskClassMetadata,
 } from './task/options-schema.js';
 export type { TaskClassMetadata, TaskOptionIssue } from './task/options-schema.js';
+export { deprecationWarning, mergeWarnings } from './task/warnings.js';
+export type { RunWarning, Deprecation } from './task/warnings.js';
 export { AgentPromptTask } from './task/agent-prompt-task.js';
 export type { AgentPromptOptions } from './task/agent-prompt-task.js';
 export { AgentTask } from './task/agent-task.js';
@@ -105,6 +107,7 @@ export type {
   NestedAgentTask,
   NestedAgentTaskFactory,
   PlanStep,
+  FlowDescription,
   HookPhase,
   HookError,
   RollbackResult,

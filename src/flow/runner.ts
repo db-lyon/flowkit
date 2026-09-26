@@ -17,6 +17,7 @@ import {
   taskClassMetadata,
   TaskOptionsError,
 } from '../task/options-schema.js';
+import { deprecationWarning, mergeWarnings, type RunWarning } from '../task/warnings.js';
 import { AgentTask, type AgentTaskOptions } from '../task/agent-task.js';
 import type { TokenLedger } from '../task/token-ledger.js';
 import { resolveReferences, type ReferenceContext } from '../references.js';
@@ -142,6 +143,12 @@ export interface FlowRunResult {
   hookErrors?: HookError[];
   /** Populated when rollback_on_failure ran. */
   rollback?: RollbackResult;
+  /**
+   * Non-fatal notices from the run or plan, in order and without repeats:
+   * deprecated tasks and flows that ran (or would run), and fired `warn` checks.
+   * Absent when there are none.
+   */
+  warnings?: RunWarning[];
 }
 
 export interface PlanStep {
@@ -163,6 +170,21 @@ export interface PlanStep {
   path?: string;
   /** Nesting depth — 0 for top-level, increments per expanded nested flow. */
   depth?: number;
+  /** Plan mode only: the step's task or flow is deprecated. */
+  deprecated?: boolean | string;
+  /** Plan mode only: the deprecated target's declared replacement. */
+  replaced_by?: string;
+}
+
+/** A flow as `FlowRunner.describeFlow` reports it. */
+export interface FlowDescription {
+  name: string;
+  description?: string;
+  deprecated?: boolean | string;
+  replaced_by?: string;
+  rollback_on_failure?: boolean;
+  /** Main steps, in run order, as the planner resolves them. */
+  steps: PlanStep[];
 }
 
 export interface FlowRunnerHooks {
@@ -418,10 +440,57 @@ export class FlowRunner {
 
   /**
    * Describe a configured (or registered) task: its class, merged default
-   * options, option schema and outputs. See `TaskRegistry.describe`.
+   * options, option schema, outputs and deprecation. See `TaskRegistry.describe`.
    */
   async describeTask(taskName: string): Promise<TaskDescription> {
     return this.registry.describe(taskName, this.tasks);
+  }
+
+  /** Describe a configured flow: its declared metadata and its resolved main steps. */
+  describeFlow(flowName: string): FlowDescription {
+    const flow = this.flows[flowName];
+    if (!flow) throw new Error(`Flow "${flowName}" not found in configuration`);
+    const out: FlowDescription = { name: flowName, steps: this.resolveExecutionPlan(flow, new Set()) };
+    if (flow.description != null) out.description = flow.description;
+    if (flow.deprecated) out.deprecated = flow.deprecated;
+    if (flow.replaced_by !== undefined) out.replaced_by = flow.replaced_by;
+    if (flow.rollback_on_failure !== undefined) out.rollback_on_failure = flow.rollback_on_failure;
+    return out;
+  }
+
+  /**
+   * The deprecation notice for a task or flow, or undefined. A task's class is
+   * resolved for its static metadata; one that cannot load reports nothing
+   * here and fails where it would have anyway, at run time.
+   */
+  private async deprecationOf(type: 'task' | 'flow', name: string): Promise<RunWarning | undefined> {
+    if (type === 'flow') {
+      const f = this.flows[name];
+      return f ? deprecationWarning('flow', name, f.deprecated, f.replaced_by) : undefined;
+    }
+    const def = this.tasks[name];
+    let meta: ReturnType<typeof taskClassMetadata> = {};
+    try {
+      meta = taskClassMetadata(await this.registry.resolve(resolveTaskDefinition(name, this.tasks).classPath));
+    } catch {
+      // Unloadable class: no static metadata to report.
+    }
+    return deprecationWarning('task', name, def?.deprecated ?? meta.deprecated, def?.replaced_by ?? meta.replacedBy);
+  }
+
+  /** Plan mode: mark deprecated rows and collect their warnings. */
+  private async annotatePlan(plan: PlanStep[]): Promise<RunWarning[]> {
+    const warnings: RunWarning[] = [];
+    for (const step of plan) {
+      if (step.skipped) continue;
+      const w = await this.deprecationOf(step.type, step.name);
+      if (!w) continue;
+      const def = step.type === 'flow' ? this.flows[step.name] : this.tasks[step.name];
+      step.deprecated = def?.deprecated || true;
+      if (w.replacedBy) step.replaced_by = w.replacedBy;
+      warnings.push(w);
+    }
+    return warnings;
   }
 
   /**
@@ -449,15 +518,26 @@ export class FlowRunner {
     const taskCtx = this.contextFor(references, executionPhase);
     try {
       let finalOptions = options;
+      let deprecation: RunWarning | undefined;
       if (taskName !== undefined) {
-        const specs = mergeOptionSpecs(
-          taskClassMetadata(await this.registry.resolve(classPath)).optionsSchema,
-          this.tasks[taskName]?.options_schema,
+        const meta = taskClassMetadata(await this.registry.resolve(classPath));
+        const def = this.tasks[taskName];
+        deprecation = deprecationWarning(
+          'task',
+          taskName,
+          def?.deprecated ?? meta.deprecated,
+          def?.replaced_by ?? meta.replacedBy,
         );
-        finalOptions = assertTaskOptions(taskName, specs, options);
+        if (deprecation) this.logger.warn({ task: taskName }, deprecation.message);
+        const specs = mergeOptionSpecs(meta.optionsSchema, def?.options_schema);
+        try {
+          finalOptions = assertTaskOptions(taskName, specs, options);
+        } catch (err) {
+          return withWarnings({ success: false, error: err as Error }, deprecation);
+        }
       }
       const task = await this.registry.create(classPath, taskCtx, finalOptions);
-      return task.run();
+      return withWarnings(await task.run(), deprecation);
     } catch (err) {
       return { success: false, error: err instanceof Error ? err : new Error(String(err)) };
     }
@@ -642,6 +722,7 @@ export class FlowRunner {
     const ancestorOwnsRollback = options.rollbackOwnedByAncestor === true;
 
     const executionPlan = this.resolveExecutionPlan(flow, skipSet);
+    const flowDeprecation = deprecationWarning('flow', options.flowName, flow.deprecated, flow.replaced_by);
 
     // Plan mode — dump all phases for visibility, nothing runs.
     if (options.plan) {
@@ -664,7 +745,11 @@ export class FlowRunner {
         ...this.planHookSteps(flow.on_failure, 'on_failure', skipSet, 20_000),
         ...this.planHookSteps(flow.finally, 'finally', skipSet, 30_000),
       ];
-      return {
+      const planWarnings = mergeWarnings(
+        flowDeprecation ? [flowDeprecation] : [],
+        await this.annotatePlan(fullPlan),
+      );
+      const planResult: FlowRunResult = {
         success: true,
         steps: fullPlan.map((s) => ({
           stepNumber: s.stepNumber,
@@ -673,14 +758,20 @@ export class FlowRunner {
           skipped: s.skipped,
           duration: 0,
           ...(s.path !== undefined ? { path: s.path, depth: s.depth } : {}),
+          ...(s.deprecated ? { deprecated: s.deprecated } : {}),
+          ...(s.replaced_by !== undefined ? { replaced_by: s.replaced_by } : {}),
         })) as unknown as FlowStepResult[],
         duration: 0,
       };
+      if (planWarnings.length > 0) planResult.warnings = planWarnings;
+      return planResult;
     }
 
     if (isTopLevel) {
       await this.hooks.beforeRun?.(options.flowName, executionPlan);
     }
+    if (flowDeprecation) this.logger.warn({ flow: options.flowName }, flowDeprecation.message);
+    const hookWarnings: RunWarning[] = [];
 
     let flowError: Error | undefined;
     let flowErrorStepName: string | undefined;
@@ -696,6 +787,7 @@ export class FlowRunner {
           parentOptions,
           undefined,
           hookErrors,
+          hookWarnings,
         );
         if (!ok) {
           flowError = hookErrors[hookErrors.length - 1]?.error;
@@ -815,6 +907,7 @@ export class FlowRunner {
                 success: nestedResult.success,
                 data: { stepCount: nestedResult.steps.length },
                 error: nestedResult.success ? undefined : nestedResult.error,
+                ...(nestedResult.warnings ? { warnings: nestedResult.warnings } : {}),
               },
               skipped: false,
               duration: Date.now() - stepStart,
@@ -892,12 +985,21 @@ export class FlowRunner {
           parentOptions,
           { error: flowError, step: flowErrorStepName },
           hookErrors,
+          hookWarnings,
         );
       }
     } else {
       const successPlan = this.planHookSteps(flow.on_success, 'on_success', skipSet, 10_000);
       for (const hookStep of successPlan) {
-        await this.runHookStep(hookStep, options, completedSteps, parentOptions, undefined, hookErrors);
+        await this.runHookStep(
+          hookStep,
+          options,
+          completedSteps,
+          parentOptions,
+          undefined,
+          hookErrors,
+          hookWarnings,
+        );
       }
     }
 
@@ -918,6 +1020,7 @@ export class FlowRunner {
           parentOptions,
           flowError ? { error: flowError, step: flowErrorStepName } : undefined,
           hookErrors,
+          hookWarnings,
         );
       }
     }
@@ -930,6 +1033,12 @@ export class FlowRunner {
       hookErrors: hookErrors.length > 0 ? hookErrors : undefined,
       rollback: rollbackResult,
     };
+    const warnings = mergeWarnings(
+      flowDeprecation ? [flowDeprecation] : [],
+      ...completedSteps.map((s) => s.result?.warnings),
+      hookWarnings,
+    );
+    if (warnings.length > 0) result.warnings = warnings;
 
     if (isTopLevel) {
       await this.hooks.afterRun?.(result);
@@ -945,6 +1054,7 @@ export class FlowRunner {
     parentOptions: ParentOptions,
     errorCtx: { error: Error; step?: string } | undefined,
     hookErrors: HookError[],
+    hookWarnings: RunWarning[] = [],
   ): Promise<boolean> {
     if (hookStep.skipped) return true;
 
@@ -984,6 +1094,7 @@ export class FlowRunner {
           },
           childParentOptions,
         );
+        if (nested.warnings) hookWarnings.push(...nested.warnings);
         if (!nested.success) {
           hookErrors.push({
             phase: hookStep.phase!,
@@ -1002,6 +1113,7 @@ export class FlowRunner {
         parentOptions,
         errorCtx,
       );
+      if (result.warnings) hookWarnings.push(...result.warnings);
       if (!result.success) {
         hookErrors.push({
           phase: hookStep.phase!,
@@ -1162,6 +1274,13 @@ export class FlowRunner {
 
     return result;
   }
+}
+
+/** Append a runner notice to a task's result without dropping any the task added itself. */
+function withWarnings(result: TaskResult, warning: RunWarning | undefined): TaskResult {
+  if (!warning) return result;
+  result.warnings = [...(result.warnings ?? []), warning];
+  return result;
 }
 
 /** Truthiness of a resolved `when:` value, with string special-cases. */
