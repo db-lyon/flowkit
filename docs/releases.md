@@ -1,5 +1,11 @@
 # Release notes
 
+## 0.18.1
+
+- **zod 4.** flowkit now depends on `zod ^4.6.7` (zod 3 has no release fixing
+  GHSA-mrhx-c7xc-m3w5). A host that extends the exported schemas must use
+  zod 4 as well; `z.record` takes an explicit key schema there.
+
 ## 0.18.0
 
 Task and flow primitives for hosts that model every action as a task, a flow
