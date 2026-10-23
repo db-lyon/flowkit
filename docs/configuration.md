@@ -594,7 +594,7 @@ const AppConfigSchema = EngineConfigSchema.extend({
     host: z.string(),
     port: z.number().default(5432),
   }),
-  features: z.record(z.boolean()).default({}),
+  features: z.record(z.string(), z.boolean()).default({}),
 });
 
 const { config } = loadConfig({

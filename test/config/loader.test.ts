@@ -12,9 +12,10 @@ const TestSchema = z.object({
   }),
   tasks: z
     .record(
+      z.string(),
       z.object({
         class_path: z.string(),
-        options: z.record(z.unknown()).default({}),
+        options: z.record(z.string(), z.unknown()).default({}),
       }),
     )
     .default({}),

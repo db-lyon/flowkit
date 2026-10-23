@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-export const TaskOptionsSchema = z.record(z.unknown());
+export const TaskOptionsSchema = z.record(z.string(), z.unknown());
 
 /** `deprecated:` on a task or flow: `true`, or a string saying why. */
 const DeprecatedSchema = z.union([z.boolean(), z.string()]);
@@ -32,15 +32,15 @@ export const OptionSpecSchema = z.object({
   minItems: z.number().int().nonnegative().optional(),
   maxItems: z.number().int().nonnegative().optional(),
   /** JSON Schema for array elements. */
-  items: z.record(z.unknown()).optional(),
+  items: z.record(z.string(), z.unknown()).optional(),
   /** JSON Schema properties for an object-valued option. */
-  properties: z.record(z.unknown()).optional(),
-  additionalProperties: z.union([z.boolean(), z.record(z.unknown())]).optional(),
+  properties: z.record(z.string(), z.unknown()).optional(),
+  additionalProperties: z.union([z.boolean(), z.record(z.string(), z.unknown())]).optional(),
   nullable: z.boolean().optional(),
 });
 
 /** A task's declared options, keyed by option name. */
-export const OptionSpecsSchema = z.record(OptionSpecSchema);
+export const OptionSpecsSchema = z.record(z.string(), OptionSpecSchema);
 
 /**
  * One declared output: a key the task puts on `TaskResult.data`. Descriptive
@@ -49,12 +49,12 @@ export const OptionSpecsSchema = z.record(OptionSpecSchema);
 export const OutputSpecSchema = z.object({
   type: z.union([OptionTypeSchema, z.array(OptionTypeSchema)]).optional(),
   description: z.string().optional(),
-  items: z.record(z.unknown()).optional(),
-  properties: z.record(z.unknown()).optional(),
+  items: z.record(z.string(), z.unknown()).optional(),
+  properties: z.record(z.string(), z.unknown()).optional(),
 });
 
 /** A task's declared outputs, keyed by `data` key. */
-export const OutputSpecsSchema = z.record(OutputSpecSchema);
+export const OutputSpecsSchema = z.record(z.string(), OutputSpecSchema);
 
 export const TaskDefinitionSchema = z.object({
   /**
@@ -149,7 +149,7 @@ function hasOneStepTarget(data: { task?: string; flow?: string }): boolean {
  */
 export function refineFlowStep<T extends z.ZodType<{ task?: string; flow?: string }>>(
   schema: T,
-): z.ZodEffects<T> {
+): T {
   return schema.refine(hasOneStepTarget, {
     message: 'Step must have exactly one of task or flow (or task: None / flow: None to skip)',
   });
@@ -212,7 +212,7 @@ export const AgentToolSchema = z
     flow: z.string().optional(),
     agent: z.string().optional(),
     description: z.string().optional(),
-    parameters: z.record(z.unknown()).optional(),
+    parameters: z.record(z.string(), z.unknown()).optional(),
   })
   .refine((t) => !!(t.task || t.flow || t.agent || t.name), {
     message: 'agent tool must reference a task, flow, or agent, or declare a name',
@@ -246,7 +246,7 @@ export const AgentDefinitionSchema = z.object({
   /** Tools the agent may call (its allowlist). */
   tools: z.array(AgentToolSchema).default([]),
   /** JSON Schema for the agent's final answer. */
-  schema: z.record(z.unknown()).optional(),
+  schema: z.record(z.string(), z.unknown()).optional(),
   /** Hard run bounds. */
   budget: AgentBudgetSchema.optional(),
   /** Sampling temperature. */
@@ -261,9 +261,9 @@ export const AgentDefinitionSchema = z.object({
 
 /** Minimal config shape the engine requires. Consumers extend with their own sections. */
 export const EngineConfigSchema = z.object({
-  tasks: z.record(TaskDefinitionSchema).default({}),
-  flows: z.record(FlowDefinitionSchema).default({}),
-  agents: z.record(AgentDefinitionSchema).default({}),
+  tasks: z.record(z.string(), TaskDefinitionSchema).default({}),
+  flows: z.record(z.string(), FlowDefinitionSchema).default({}),
+  agents: z.record(z.string(), AgentDefinitionSchema).default({}),
 });
 
 export type TaskOptions = z.infer<typeof TaskOptionsSchema>;

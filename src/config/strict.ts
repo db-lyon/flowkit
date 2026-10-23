@@ -71,12 +71,12 @@ export function assertKnownKeys(
 // ---------------------------------------------------------------------------
 
 interface AnyDef {
-  typeName?: string;
+  type?: string;
   [key: string]: unknown;
 }
 
 function defOf(schema: z.ZodTypeAny): AnyDef {
-  return (schema as unknown as { _def: AnyDef })._def;
+  return (schema as unknown as { _zod: { def: AnyDef } })._zod.def;
 }
 
 function isPlainObject(v: unknown): v is Record<string, unknown> {
@@ -98,43 +98,40 @@ function walk(
 ): void {
   if (value === undefined || value === null) return;
   const def = defOf(schema);
-  switch (def.typeName) {
-    case 'ZodOptional':
-    case 'ZodNullable':
-    case 'ZodDefault':
-    case 'ZodCatch':
-    case 'ZodReadonly':
+  switch (def.type) {
+    case 'optional':
+    case 'nullable':
+    case 'default':
+    case 'prefault':
+    case 'nonoptional':
+    case 'catch':
+    case 'readonly':
       return walk(def.innerType as z.ZodTypeAny, value, path, out, rootSkip);
-    case 'ZodEffects':
-      return walk(def.schema as z.ZodTypeAny, value, path, out, rootSkip);
-    case 'ZodBranded':
-      return walk(def.type as z.ZodTypeAny, value, path, out, rootSkip);
-    case 'ZodPipeline':
+    case 'pipe':
       return walk(def.in as z.ZodTypeAny, value, path, out, rootSkip);
-    case 'ZodLazy':
+    case 'lazy':
       return walk((def.getter as () => z.ZodTypeAny)(), value, path, out, rootSkip);
-    case 'ZodArray':
+    case 'array':
       if (!Array.isArray(value)) return;
-      value.forEach((item, i) => walk(def.type as z.ZodTypeAny, item, `${path}[${i}]`, out, null));
+      value.forEach((item, i) => walk(def.element as z.ZodTypeAny, item, `${path}[${i}]`, out, null));
       return;
-    case 'ZodRecord':
+    case 'record':
       if (!isPlainObject(value)) return;
       for (const [k, v] of Object.entries(value)) {
         walk(def.valueType as z.ZodTypeAny, v, joinPath(path, k), out, null);
       }
       return;
-    case 'ZodUnion':
-    case 'ZodDiscriminatedUnion':
+    case 'union':
       return walkUnion(def.options as z.ZodTypeAny[], value, path, out);
-    case 'ZodObject':
-      return walkObject(schema as z.AnyZodObject, value, path, out, rootSkip);
+    case 'object':
+      return walkObject(schema as z.ZodObject, value, path, out, rootSkip);
     default:
       return;
   }
 }
 
 function walkObject(
-  schema: z.AnyZodObject,
+  schema: z.ZodObject,
   value: unknown,
   path: string,
   out: UnknownConfigKey[],
@@ -143,9 +140,9 @@ function walkObject(
   if (!isPlainObject(value)) return;
   const def = defOf(schema);
   const shape = schema.shape as Record<string, z.ZodTypeAny>;
+  // `.passthrough()` is a catchall of `unknown` and `.strict()` one of `never`.
   const catchall = def.catchall as z.ZodTypeAny | undefined;
-  const hasCatchall = !!catchall && defOf(catchall).typeName !== 'ZodNever';
-  const acceptsExtra = def.unknownKeys === 'passthrough' || hasCatchall;
+  const hasCatchall = !!catchall && defOf(catchall).type !== 'never';
 
   for (const [k, v] of Object.entries(value)) {
     if (rootSkip?.has(k)) continue;
@@ -153,7 +150,7 @@ function walkObject(
       walk(shape[k]!, v, joinPath(path, k), out, null);
     } else if (hasCatchall) {
       walk(catchall!, v, joinPath(path, k), out, null);
-    } else if (!acceptsExtra) {
+    } else {
       out.push({ path: joinPath(path, k), key: k, suggestion: closest(k, Object.keys(shape)) });
     }
   }
