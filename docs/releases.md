@@ -1,5 +1,12 @@
 # Release notes
 
+## 0.18.2
+
+- **Registry base directory.** `new TaskRegistry({ baseDir })` resolves an
+  unregistered dotted `class_path` from `baseDir` instead of `process.cwd()`,
+  so a host can resolve the class paths in a config file from that file's
+  folder. Without the option the lookup is unchanged.
+
 ## 0.18.1
 
 - **zod 4.** flowkit now depends on `zod ^4.6.7` (zod 3 has no release fixing
