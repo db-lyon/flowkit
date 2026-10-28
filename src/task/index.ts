@@ -10,7 +10,7 @@ export type {
 export { ShellTask } from './shell-task.js';
 export type { ShellTaskOptions } from './shell-task.js';
 export { TaskRegistry } from './registry.js';
-export type { TaskConstructor, TaskDescription } from './registry.js';
+export type { TaskConstructor, TaskDescription, TaskRegistryOptions } from './registry.js';
 export {
   TaskOptionsError,
   validateTaskOptions,

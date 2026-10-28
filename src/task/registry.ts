@@ -45,10 +45,25 @@ export interface TaskDescription {
   replaced_by?: string;
 }
 
+export interface TaskRegistryOptions {
+  /**
+   * The directory a dotted `class_path` is resolved against when it is not
+   * registered. Usually the folder of the config file that names it. Defaults
+   * to `process.cwd()`, read at lookup time.
+   */
+  baseDir?: string;
+}
+
 export class TaskRegistry {
   private classPathMap = new Map<string, TaskConstructor>();
   private nameMap = new Map<string, TaskConstructor>();
   private dynamicCache = new Map<string, TaskConstructor>();
+  /** Where unregistered class paths are looked up; undefined means the cwd. */
+  readonly baseDir: string | undefined;
+
+  constructor(options: TaskRegistryOptions = {}) {
+    this.baseDir = options.baseDir;
+  }
 
   /** Register a task by short name (e.g. `'deploy'`). */
   register(name: string, ctor: TaskConstructor): this {
@@ -233,13 +248,13 @@ export class TaskRegistry {
 
   private classPathToCandidates(classPath: string): string[] {
     const segments = classPath.replace(/\./g, '/');
-    const cwd = process.cwd();
+    const base = this.baseDir ?? process.cwd();
 
     return [
-      path.resolve(cwd, `${segments}.ts`),
-      path.resolve(cwd, `${segments}.js`),
-      path.resolve(cwd, `${segments}/index.ts`),
-      path.resolve(cwd, `${segments}/index.js`),
+      path.resolve(base, `${segments}.ts`),
+      path.resolve(base, `${segments}.js`),
+      path.resolve(base, `${segments}/index.ts`),
+      path.resolve(base, `${segments}/index.js`),
     ];
   }
 }

@@ -1,4 +1,6 @@
 import { describe, it, expect } from 'vitest';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { TaskRegistry } from '../../src/task/registry.js';
 import {
   BaseTask,
@@ -104,6 +106,26 @@ describe('TaskRegistry', () => {
 
     expect(task.taskName).toBe('dynamic-second-copy');
     expect(result.success).toBe(true);
+  });
+
+  it('resolves a dynamic class path against baseDir, not the cwd', async () => {
+    const testDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+    // 'fixtures.*' exists under test/, never under the repo root the run starts in.
+    await expect(new TaskRegistry().resolve('fixtures.dynamic-explicit-task')).rejects.toThrow(
+      /Cannot resolve task/,
+    );
+
+    const reg = new TaskRegistry({ baseDir: testDir });
+    expect(reg.baseDir).toBe(testDir);
+    const task = await reg.create('fixtures.dynamic-explicit-task', {}, {});
+    expect(task.taskName).toBe('dynamic-explicit');
+  });
+
+  it('names the baseDir paths it searched when nothing is there', async () => {
+    const base = path.resolve('no-such-dir');
+    await expect(new TaskRegistry({ baseDir: base }).resolve('tasks.Missing')).rejects.toThrow(
+      path.join(base, 'tasks', 'Missing.ts'),
+    );
   });
 
   it('refuses a dynamic class that only looks like a task', async () => {
