@@ -51,7 +51,7 @@ export type {
 export { ShellTask } from './task/shell-task.js';
 export type { ShellTaskOptions } from './task/shell-task.js';
 export { TaskRegistry } from './task/registry.js';
-export type { TaskConstructor, TaskDescription } from './task/registry.js';
+export type { TaskConstructor, TaskDescription, TaskRegistryOptions } from './task/registry.js';
 export {
   TaskOptionsError,
   validateTaskOptions,

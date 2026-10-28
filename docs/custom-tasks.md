@@ -350,12 +350,18 @@ registry.registerAll({
 
 ### Dynamic resolution
 
-If a `class_path` isn't found in the registry, flowkit converts dots to path separators and looks for a file on disk:
+If a `class_path` isn't found in the registry, flowkit converts dots to path separators and looks for a file on disk, relative to the registry's `baseDir` (`process.cwd()` when none is given):
 
 | class_path | Files checked |
 |------------|---------------|
 | `tasks.FetchData` | `tasks/FetchData.ts`, `tasks/FetchData.js`, `tasks/FetchData/index.ts`, `tasks/FetchData/index.js` |
 | `lib.etl.Extract` | `lib/etl/Extract.ts`, `lib/etl/Extract.js`, ... |
+
+A host that loads `class_path`s from a config file should resolve them from that file's folder, so the lookup does not depend on where the process was started:
+
+```typescript
+const registry = new TaskRegistry({ baseDir: path.dirname(configFile) });
+```
 
 The module must have either a `default` export or a named export matching the last segment of the path (e.g., `FetchData`). The export must extend `BaseTask`.
 

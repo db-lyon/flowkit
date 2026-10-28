@@ -250,6 +250,7 @@ import {
   validateTaskOptions as rootValidateTaskOptions,
   type OptionSpecs as RootOptionSpecs,
   type TaskDescription as RootTaskDescription,
+  type TaskRegistryOptions as RootTaskRegistryOptions,
   type FlowDescription as RootFlowDescription,
   type PreflightResult as RootPreflightResult,
   type StepReferenceIssue as RootStepReferenceIssue,
@@ -293,6 +294,10 @@ async function publicPrimitives(runner: InstanceType<typeof RootFlowRunner>): Pr
   const warnings: RootRunWarning[] | undefined = (await runner.runTask('item')).warnings;
   void [d, fd, pf2, issues, plan, warnings];
 }
+
+const registryOptions: RootTaskRegistryOptions = { baseDir: '/project' };
+const baseDirRegistry: string | undefined = new RootTaskRegistry(registryOptions).baseDir;
+void baseDirRegistry;
 
 const evaluatorCtx = (ctx: RootConditionContext) => [ctx.references, ctx.check?.action, ctx.step?.name, ctx.flowName];
 const checkErrors: Error[] = [RootCheckFailedError.prototype, FlowCheckFailedError.prototype];
